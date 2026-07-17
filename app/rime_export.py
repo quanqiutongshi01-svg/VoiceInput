@@ -80,8 +80,9 @@ def build_phrases(cfg):
     return out
 
 
-def main():
-    cfg_path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
+def export(cfg_path=None):
+    """写入 RIME 用户目录,返回 (用户目录, 词条数)。"""
+    cfg_path = cfg_path or os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "config.json")
     cfg = json.load(open(cfg_path, encoding="utf-8-sig"))
     dst = rime_user_dir()
@@ -96,8 +97,14 @@ def main():
                 "# 格式: 词\t编码\t权重\n")
         for w, code, q in phrases:
             f.write(f"{w}\t{code}\t{q}\n")
+    return dst, len(phrases)
+
+
+def main():
+    cfg_path = sys.argv[1] if len(sys.argv) > 1 else None
+    dst, n = export(cfg_path)
     print(f"已写入 {dst}:default.custom.yaml / luna_pinyin.custom.yaml / "
-          f"custom_phrase.txt({len(phrases)} 词)")
+          f"custom_phrase.txt({n} 词)")
     print("下一步:安装鼠须管(mac)/小狼毫(win)后,在输入法菜单点「重新部署」生效。")
 
 

@@ -168,7 +168,7 @@ from sounds import play  # noqa: E402  柔和提示音(带蜂鸣兜底)
 # 界面层(悬浮条/设置窗口/动画控件/历史)在 ui.py
 from ui import Overlay, SettingsDialog, HistoryDialog  # noqa: E402
 
-VERSION = "3.3.0"
+VERSION = "3.4.0"
 
 
 # ---------- 信号桥:非 Qt 线程 → Qt 主线程(int 均为会话代数,-1=应用级) ----------
@@ -357,6 +357,10 @@ class VoiceInputApp:
         self._act_export = QAction("导出个人语音包")
         self._act_export.triggered.connect(self._export_profile)
         self._menu.addAction(self._act_export)
+        self._act_rime = QAction("安装键盘输入法(小狼毫)…")
+        self._act_rime.setVisible(sys.platform == "win32")
+        self._act_rime.triggered.connect(self._install_keyboard_ime)
+        self._menu.addAction(self._act_rime)
         self._act_update = QAction("安装更新包…")
         self._act_update.triggered.connect(self._install_update)
         self._menu.addAction(self._act_update)
@@ -589,6 +593,68 @@ class VoiceInputApp:
                 self.bridge.error.emit(-1, "润色失败,详情见日志")
             finally:
                 self._polishing = False
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _install_keyboard_ime(self):
+        """一键安装 RIME 小狼毫 + 写入听晓个人词库/口音容错 + 部署。"""
+        ret = QMessageBox.question(
+            None, "安装键盘输入法",
+            "将下载并安装开源输入法「小狼毫(RIME)」(约15MB,官方渠道),\n"
+            "并自动写入你的个人词库和口音容错配置。\n\n"
+            "安装时 Windows 会弹权限确认,请选「是」。继续吗?",
+            QMessageBox.Yes | QMessageBox.No)
+        if ret != QMessageBox.Yes:
+            return
+
+        def work():
+            try:
+                import glob
+                import subprocess
+                import tempfile
+
+                import updater
+
+                self.bridge.busy.emit("正在下载小狼毫…")
+                with updater._urlopen(
+                        "https://api.github.com/repos/rime/weasel/releases/latest",
+                        timeout=15) as r:
+                    rel = json.loads(r.read().decode("utf-8"))
+                exes = [a["browser_download_url"] for a in rel.get("assets", [])
+                        if a.get("name", "").endswith(".exe")]
+                if not exes:
+                    self.bridge.error.emit(-1, "没找到小狼毫安装包,稍后再试")
+                    return
+                tmp = os.path.join(tempfile.gettempdir(), "weasel-setup.exe")
+                with updater._urlopen(exes[0], timeout=300) as r, open(tmp, "wb") as f:
+                    import shutil as _sh
+
+                    _sh.copyfileobj(r, f)
+                self.bridge.busy.emit("正在安装(请在弹窗中确认)…")
+                # NSIS 静默参数 /S;若安装器不支持会转为交互界面,由用户点完
+                subprocess.run([tmp, "/S"], timeout=900)
+                self.bridge.busy.emit("正在写入个人词库…")
+                import rime_export
+
+                dst, n = rime_export.export(os.path.join(BASE, "config.json"))
+                # 尝试自动部署(找 WeaselDeployer)
+                deployed = False
+                for pat in (r"C:\Program Files (x86)\Rime\weasel*\WeaselDeployer.exe",
+                            r"C:\Program Files\Rime\weasel*\WeaselDeployer.exe"):
+                    hits = glob.glob(pat)
+                    if hits:
+                        subprocess.run([hits[-1], "/deploy"], timeout=120)
+                        deployed = True
+                        break
+                self.bridge.done.emit(
+                    -1, f"小狼毫安装完成,已写入 {n} 个个人词条"
+                        + ("" if deployed else "(请在输入法菜单点一次「重新部署」)"), False)
+                self.bridge.notify.emit(
+                    "键盘输入法就绪",
+                    "按 Win+空格 切换到「小狼毫」。打 claude 出 Claude,支持口音容错。", 8000)
+            except Exception:
+                traceback.print_exc()
+                self.bridge.error.emit(-1, "键盘输入法安装失败,详情见日志")
 
         threading.Thread(target=work, daemon=True).start()
 
