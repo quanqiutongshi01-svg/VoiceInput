@@ -148,12 +148,18 @@ class QuickTransferDialog(QDialog):
         self.setStyleSheet(XFER_QSS)
         self.setFont(ui_font(13))
 
-        tabs = QTabWidget()
-        tabs.addTab(self._send_tab(), "发送")
-        tabs.addTab(self._history_tab("sent", "发送记录"), "发送记录")
+        self._sending = False
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self._send_tab(), "发送")
+        self._hist_scroll = QScrollArea()
+        self._hist_scroll.setWidgetResizable(True)
+        self.tabs.addTab(self._hist_scroll, "发送记录")
+        self._reload_history()
+        self.tabs.currentChanged.connect(
+            lambda i: self._reload_history() if i == 1 else None)
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 12, 14, 12)
-        root.addWidget(tabs)
+        root.addWidget(self.tabs)
 
         self.progress_sig.connect(self._on_progress)
         self.item_result_sig.connect(self._on_item_result)
@@ -228,27 +234,32 @@ class QuickTransferDialog(QDialog):
     def _send(self):
         import threading
 
+        if self._sending:
+            return
         peer = self.peer_box.currentData()
         if not peer:
             QMessageBox.information(self, "快传", "还没发现对方设备。确认对方也开着听晓、连同一 WiFi。")
             return
-        files = list(self.chips.keys())
+        files = list(self.chips.keys())    # 只发暂存区里还在的(发成功的会被移走)
         text = self.text.toPlainText().strip()
         if not files and not text:
             QMessageBox.information(self, "快传", "先拖入文件,或输入要发送的文字。")
             return
+        self._sending = True
         self.send_btn.setEnabled(False)
 
         def work():
-            if text:
-                ok, err = self.service.send_text(peer, text)
-                self.item_result_sig.emit("__text__", ok, err)
-            for path in files:
-                ok, err = self.service.send_file(
-                    peer, path,
-                    progress=lambda s, t, p=path: self.progress_sig.emit(p, s, t))
-                self.item_result_sig.emit(path, ok, err)
-            self.all_done_sig.emit("")
+            try:
+                if text:
+                    ok, err = self.service.send_text(peer, text)
+                    self.item_result_sig.emit("__text__", ok, err)
+                for path in files:
+                    ok, err = self.service.send_file(
+                        peer, path,
+                        progress=lambda s, t, p=path: self.progress_sig.emit(p, s, t))
+                    self.item_result_sig.emit(path, ok, err)
+            finally:
+                self.all_done_sig.emit("")
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -262,27 +273,34 @@ class QuickTransferDialog(QDialog):
             if ok:
                 self.text.clear()
             elif err:
-                self.setWindowTitle(f"听晓快传 — 文字{err}")
+                QMessageBox.warning(self, "快传", f"文字发送失败:{err}")
             return
-        c = self.chips.get(path)
-        if c:
-            c.set_done(ok)
-            if not ok and err:
-                c.label.setText(c.label.text() + f"  ({err})")
+        if ok:
+            # 发送成功:从暂存区移走,归档到发送记录
+            self._remove_file(path)
+        else:
+            c = self.chips.get(path)
+            if c:
+                c.set_done(False)
+                if err:
+                    c.label.setText(c.label.text() + f"  ({err})")
 
     def _on_all_done(self, _):
+        self._sending = False
         self.send_btn.setEnabled(True)
-        self.setWindowTitle("听晓快传 — 完成")
+        self._reload_history()
+        remaining = len(self.chips)
+        self.setWindowTitle("听晓快传" + (f" — 还剩{remaining}个待发/失败" if remaining else " — 已发送 ✓"))
 
     # ---- 历史页 ----
 
-    def _history_tab(self, kind, _title):
+    def _reload_history(self):
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(0, 8, 0, 0)
-        recs = self.service.history(kind)
+        recs = self.service.history("sent")
         if not recs:
-            v.addWidget(QLabel("暂无记录"))
+            v.addWidget(QLabel("暂无发送记录"))
         for r in recs:
             ts = r.get("ts", "")
             when = f"{ts[4:6]}-{ts[6:8]} {ts[9:11]}:{ts[11:13]}" if len(ts) >= 13 else ""
@@ -293,8 +311,7 @@ class QuickTransferDialog(QDialog):
                               "border-bottom:1px solid #3a3a3c;")
             v.addWidget(lbl)
         v.addStretch(1)
-        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(w)
-        return scroll
+        self._hist_scroll.setWidget(w)
 
 
 class InboxDialog(QDialog):
