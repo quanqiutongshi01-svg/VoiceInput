@@ -168,7 +168,7 @@ from sounds import play  # noqa: E402  柔和提示音(带蜂鸣兜底)
 # 界面层(悬浮条/设置窗口/动画控件/历史)在 ui.py
 from ui import Overlay, SettingsDialog, HistoryDialog  # noqa: E402
 
-VERSION = "3.5.1"
+VERSION = "3.5.2"
 
 
 # ---------- 信号桥:非 Qt 线程 → Qt 主线程(int 均为会话代数,-1=应用级) ----------
@@ -597,8 +597,9 @@ class VoiceInputApp:
             traceback.print_exc()
 
     def _open_transfer(self):
-        if not self._xfer:
-            self.overlay.show_error("快传服务未就绪")
+        if not self._xfer or getattr(self._xfer, "error", ""):
+            msg = getattr(self._xfer, "error", "") if self._xfer else "快传服务未就绪"
+            QMessageBox.information(None, "家庭快传", msg or "快传服务未就绪")
             return
         from transfer_ui import QuickTransferDialog
 

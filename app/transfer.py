@@ -104,6 +104,10 @@ class TransferService:
     # ---- 生命周期 ----
 
     def start(self):
+        if not self.family_code:
+            self.error = "快传未配对(请安装 Leo 提供的家庭版,含专属家庭码)"
+            print(f"[transfer] {self.error},服务不启动")
+            return
         try:
             os.makedirs(self.save_dir, exist_ok=True)
         except Exception as e:
