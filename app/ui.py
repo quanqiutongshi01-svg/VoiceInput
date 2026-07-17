@@ -520,10 +520,16 @@ def set_autostart(enable, exe_path):
                 pass
 
 
+def _hotkey_choices():
+    """返回 [(配置值, 显示名)]。Mac 用键码表的中文名,Win 用现有集合。"""
+    if sys.platform == "darwin":
+        from hotkeys import MAC_KEYS
+        return [(k, v[1]) for k, v in MAC_KEYS.items()]
+    return [(k, k.upper()) for k in ["f9", "f8", "f7", "f4", "scroll lock", "pause"]]
+
+
 class SettingsDialog(QDialog):
-    VALID_KEYS = (["right option", "right command", "f9", "f8"]
-                  if sys.platform == "darwin"
-                  else ["f9", "f8", "scroll lock", "pause"])
+    VALID_KEYS = [c[0] for c in _hotkey_choices()]
 
     def __init__(self, cfg, devices, data_dir="data", exe_path="", on_reset_overlay=None,
                  version="", parent=None):
@@ -542,17 +548,21 @@ class SettingsDialog(QDialog):
         self.record_mode.setCurrentIndex(
             1 if cfg.get("record_mode", "hold") == "toggle" else 0)
 
+        choices = _hotkey_choices()
         self.hotkey = QComboBox()
-        self.hotkey.addItems(self.VALID_KEYS)
-        cur = cfg.get("hotkey", "f9")
-        if cur not in self.VALID_KEYS:
-            self.hotkey.addItem(cur)
-        self.hotkey.setCurrentText(cur)
+        for val, label in choices:
+            self.hotkey.addItem(label, val)
+        cur = cfg.get("hotkey", choices[0][0])
+        hidx = self.hotkey.findData(cur)
+        if hidx < 0:
+            self.hotkey.addItem(cur, cur)
+            hidx = self.hotkey.count() - 1
+        self.hotkey.setCurrentIndex(hidx)
 
         self.polish_key = QComboBox()
         self.polish_key.addItem("不启用", "off")
-        for k in self.VALID_KEYS:
-            self.polish_key.addItem(k, k)
+        for val, label in choices:
+            self.polish_key.addItem(label, val)
         pcur = cfg.get("polish_hotkey", "off") or "off"
         pidx = self.polish_key.findData(pcur)
         self.polish_key.setCurrentIndex(max(0, pidx))
@@ -676,7 +686,7 @@ class SettingsDialog(QDialog):
     def apply_to(self, cfg):
         cfg["polish_hotkey"] = self.polish_key.currentData() or "off"
         cfg["record_mode"] = self.record_mode.currentData() or "hold"
-        cfg["hotkey"] = self.hotkey.currentText().strip().lower() or "f9"
+        cfg["hotkey"] = self.hotkey.currentData() or "f9"
         cfg["mic_name_contains"] = self.mic.currentData() or ""
         cfg["beep"] = self.beep.isChecked()
         cfg["persistent_mic"] = self.persistent.isChecked()

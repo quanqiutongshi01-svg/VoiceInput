@@ -199,7 +199,7 @@ from sounds import play  # noqa: E402  柔和提示音(带蜂鸣兜底)
 # 界面层(悬浮条/设置窗口/动画控件/历史)在 ui.py
 from ui import Overlay, SettingsDialog, HistoryDialog  # noqa: E402
 
-VERSION = "3.5.6"
+VERSION = "3.5.7"
 
 
 def brand_pixmap(size):
@@ -246,6 +246,7 @@ class Bridge(QObject):
     busy = Signal(str)              # 悬浮条忙碌提示
     xfer_in = Signal(str, str, str) # 收到快传(kind, from, payload)
     xfer_peers = Signal(list)       # 在线设备表变化
+    perm_needed = Signal(str)       # 缺 macOS 输入监控权限
 
 
 # ---------- 主控 ----------
@@ -282,6 +283,7 @@ class VoiceInputApp:
         self.bridge.busy.connect(self.overlay.show_busy, Qt.QueuedConnection)
         self.bridge.xfer_in.connect(self._on_xfer_in, Qt.QueuedConnection)
         self.bridge.xfer_peers.connect(self._on_xfer_peers, Qt.QueuedConnection)
+        self.bridge.perm_needed.connect(self._on_perm_needed, Qt.QueuedConnection)
 
         self.ready = False
         self.recording = False
@@ -347,7 +349,10 @@ class VoiceInputApp:
                     persistent=self.cfg.get("persistent_mic", True),
                 )
                 self.recorder.open()
-                self._bind_hotkey(self.cfg.get("hotkey", "f9"))
+                try:
+                    self._bind_hotkey(self.cfg.get("hotkey", "f9"))
+                except PermissionError as pe:
+                    self.bridge.perm_needed.emit(str(pe))
                 if not self._workers_started:
                     self._workers_started = True
                     threading.Thread(target=self._final_worker, daemon=True).start()
@@ -661,6 +666,24 @@ class VoiceInputApp:
         self._xfer_dialog.show()
         self._xfer_dialog.raise_()
         self._xfer_dialog.activateWindow()
+
+    def _on_perm_needed(self, msg):
+        box = QMessageBox(QMessageBox.Warning, "需要授权「输入监控」", msg + "\n\n"
+                          "听晓要监听你选的热键,必须获得这个权限,否则按键没有反应。",
+                          QMessageBox.NoButton)
+        open_btn = box.addButton("打开系统设置", QMessageBox.AcceptRole)
+        box.addButton("知道了", QMessageBox.RejectRole)
+        box.exec()
+        if box.clickedButton() is open_btn:
+            try:
+                import subprocess
+
+                subprocess.Popen([
+                    "open",
+                    "x-apple.systempreferences:com.apple.preference.security"
+                    "?Privacy_ListenEvent"])
+            except Exception:
+                traceback.print_exc()
 
     def _on_xfer_peers(self, peers):
         if self._xfer_dialog and self._xfer_dialog.isVisible():

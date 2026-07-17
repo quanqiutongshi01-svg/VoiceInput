@@ -43,40 +43,69 @@ class _WinHotkeys:
         self._hooks = []
 
 
-class _MacHotkeys:
-    """Quartz CGEventTap 装在主线程的 CFRunLoop 上,只读虚拟键码,
-    不碰输入源接口(pynput 在后台线程调 TIS 会触发 macOS 队列断言崩溃)。
-    只支持修饰键(右Option/右Command)和功能键——足够听晓用。"""
+# macOS 可选热键:配置值 -> (虚拟键码, 中文名, 修饰键flag掩码或None)
+MAC_KEYS = {
+    "right option":  (61, "右 Option 键", 0x00080000),
+    "left option":   (58, "左 Option 键", 0x00080000),
+    "right command": (54, "右 Command 键", 0x00100000),
+    "right control": (62, "右 Control 键", 0x00040000),
+    "right shift":   (60, "右 Shift 键", 0x00020000),
+    "f6":  (97, "F6", None), "f7": (98, "F7", None), "f8": (100, "F8", None),
+    "f9":  (101, "F9", None), "f10": (109, "F10", None), "f11": (103, "F11", None),
+    "f12": (111, "F12", None), "f13": (105, "F13", None),
+    "f14": (107, "F14", None), "f15": (113, "F15", None),
+}
 
-    # macOS 虚拟键码
-    KEYCODE = {
-        "right option": 61, "right command": 54,
-        "f9": 101, "f8": 100, "f10": 109, "f7": 98,
-    }
-    # 修饰键在 flagsChanged 事件里对应的 flag 掩码(判断按下/松开)
-    MOD_MASK = {61: 0x00080000, 54: 0x00100000}  # alternate / command
+
+def mac_input_monitoring_ok(request=False):
+    """检查(可选请求)macOS 输入监控权限——全局热键必需。"""
+    try:
+        import Quartz
+
+        if request and hasattr(Quartz, "CGRequestListenEventAccess"):
+            Quartz.CGRequestListenEventAccess()
+        if hasattr(Quartz, "CGPreflightListenEventAccess"):
+            return bool(Quartz.CGPreflightListenEventAccess())
+    except Exception:
+        pass
+    return True  # 老系统没这套 API,当作已授权,交给 tap 创建自己失败
+
+
+class _MacHotkeys:
+    """Quartz CGEventTap 装在主线程 CFRunLoop 上,只读虚拟键码,
+    不碰输入源接口(pynput 后台线程调 TIS 会触发 macOS 断言崩溃)。"""
 
     def __init__(self):
         self._tap = None
         self._src = None
         self._downs = {}
         self._ups = {}
+        self._mask = {}  # keycode -> flag掩码(修饰键)
 
     def bind_many(self, bindings):
         import Quartz
 
-        downs, ups = {}, {}
+        downs, ups, mods = {}, {}, {}
         for key, on_down, on_up in bindings:
-            code = self.KEYCODE.get(str(key).lower())
-            if code is None:
+            spec = MAC_KEYS.get(str(key).lower())
+            if spec is None:
                 raise ValueError(
-                    f"macOS 不支持热键「{key}」,可选:{'、'.join(self.KEYCODE)}")
+                    f"macOS 不支持热键「{key}」,可在设置里另选一个")
+            code, _label, mask = spec
             downs[code] = on_down
             if on_up is not None:
                 ups[code] = on_up
-        self._downs, self._ups = downs, ups
+            if mask is not None:
+                mods[code] = mask
+        self._downs, self._ups, self._mask = downs, ups, mods
         if self._tap is not None:
             return  # tap 已装,换绑只更新回调字典即可
+
+        # 权限自检:没有"输入监控"授权,tap 收不到任何事件 = 按键无反应
+        if not mac_input_monitoring_ok(request=True):
+            raise PermissionError(
+                "缺少「输入监控」权限。请在 系统设置 → 隐私与安全性 → 输入监控 "
+                "里勾选「听晓」,然后重启听晓。")
 
         mask = ((1 << Quartz.kCGEventKeyDown) | (1 << Quartz.kCGEventKeyUp)
                 | (1 << Quartz.kCGEventFlagsChanged))
@@ -86,12 +115,15 @@ class _MacHotkeys:
                 code = Quartz.CGEventGetIntegerValueField(
                     event, Quartz.kCGKeyboardEventKeycode)
                 if etype == Quartz.kCGEventFlagsChanged:
-                    m = self.MOD_MASK.get(code)
+                    m = self._mask.get(code)
                     if m is not None:
                         flags = Quartz.CGEventGetFlags(event)
-                        (self._downs if (flags & m) else self._ups).get(
-                            code, lambda: None)()
+                        down = bool(flags & m)
+                        print(f"[hotkey] 修饰键 {code} {'按下' if down else '松开'}")
+                        (self._downs if down else self._ups).get(code, lambda: None)()
                 elif etype == Quartz.kCGEventKeyDown:
+                    if code in self._downs:
+                        print(f"[hotkey] 键 {code} 按下")
                     self._downs.get(code, lambda: None)()
                 elif etype == Quartz.kCGEventKeyUp:
                     self._ups.get(code, lambda: None)()
