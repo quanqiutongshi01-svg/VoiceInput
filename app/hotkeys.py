@@ -44,54 +44,87 @@ class _WinHotkeys:
 
 
 class _MacHotkeys:
+    """Quartz CGEventTap 装在主线程的 CFRunLoop 上,只读虚拟键码,
+    不碰输入源接口(pynput 在后台线程调 TIS 会触发 macOS 队列断言崩溃)。
+    只支持修饰键(右Option/右Command)和功能键——足够听晓用。"""
+
+    # macOS 虚拟键码
+    KEYCODE = {
+        "right option": 61, "right command": 54,
+        "f9": 101, "f8": 100, "f10": 109, "f7": 98,
+    }
+    # 修饰键在 flagsChanged 事件里对应的 flag 掩码(判断按下/松开)
+    MOD_MASK = {61: 0x00080000, 54: 0x00100000}  # alternate / command
+
     def __init__(self):
-        self._listener = None
-
-    @staticmethod
-    def _keymap():
-        from pynput import keyboard as pk
-
-        return {
-            "right option": pk.Key.alt_r,
-            "right command": pk.Key.cmd_r,
-            "f9": pk.Key.f9,
-            "f8": pk.Key.f8,
-            "f10": pk.Key.f10,
-        }
+        self._tap = None
+        self._src = None
+        self._downs = {}
+        self._ups = {}
 
     def bind_many(self, bindings):
-        """bindings: [(key, on_down, on_up 或 None)]。单个监听器分发多键。"""
-        from pynput import keyboard as pk
+        import Quartz
 
-        keymap = self._keymap()
         downs, ups = {}, {}
         for key, on_down, on_up in bindings:
-            target = keymap.get(str(key).lower())
-            if target is None:
+            code = self.KEYCODE.get(str(key).lower())
+            if code is None:
                 raise ValueError(
-                    f"macOS 不支持热键「{key}」,可选:{'、'.join(keymap)}")
-            downs[target] = on_down
+                    f"macOS 不支持热键「{key}」,可选:{'、'.join(self.KEYCODE)}")
+            downs[code] = on_down
             if on_up is not None:
-                ups[target] = on_up
-        listener = pk.Listener(
-            on_press=lambda k: downs[k]() if k in downs else None,
-            on_release=lambda k: ups[k]() if k in ups else None,
-        )
-        listener.start()
-        old = self._listener
-        self._listener = listener
-        if old:
+                ups[code] = on_up
+        self._downs, self._ups = downs, ups
+        if self._tap is not None:
+            return  # tap 已装,换绑只更新回调字典即可
+
+        mask = ((1 << Quartz.kCGEventKeyDown) | (1 << Quartz.kCGEventKeyUp)
+                | (1 << Quartz.kCGEventFlagsChanged))
+
+        def callback(proxy, etype, event, refcon):
             try:
-                old.stop()
+                code = Quartz.CGEventGetIntegerValueField(
+                    event, Quartz.kCGKeyboardEventKeycode)
+                if etype == Quartz.kCGEventFlagsChanged:
+                    m = self.MOD_MASK.get(code)
+                    if m is not None:
+                        flags = Quartz.CGEventGetFlags(event)
+                        (self._downs if (flags & m) else self._ups).get(
+                            code, lambda: None)()
+                elif etype == Quartz.kCGEventKeyDown:
+                    self._downs.get(code, lambda: None)()
+                elif etype == Quartz.kCGEventKeyUp:
+                    self._ups.get(code, lambda: None)()
             except Exception:
-                pass
+                import traceback
+                traceback.print_exc()
+            return event
+
+        tap = Quartz.CGEventTapCreate(
+            Quartz.kCGSessionEventTap, Quartz.kCGHeadInsertEventTap,
+            Quartz.kCGEventTapOptionListenOnly, mask, callback, None)
+        if not tap:
+            raise RuntimeError(
+                "无法创建键盘监听(请在 系统设置→隐私与安全性→输入监控 里勾选听晓/终端)")
+        src = Quartz.CFMachPortCreateRunLoopSource(None, tap, 0)
+        Quartz.CFRunLoopAddSource(
+            Quartz.CFRunLoopGetMain(), src, Quartz.kCFRunLoopCommonModes)
+        Quartz.CGEventTapEnable(tap, True)
+        self._tap, self._src = tap, src
 
     def unbind_all(self):
-        if self._listener:
+        self._downs, self._ups = {}, {}
+        if self._tap is not None:
             try:
-                self._listener.stop()
+                import Quartz
+
+                Quartz.CGEventTapEnable(self._tap, False)
+                Quartz.CFRunLoopRemoveSource(
+                    Quartz.CFRunLoopGetMain(), self._src,
+                    Quartz.kCFRunLoopCommonModes)
             except Exception:
                 pass
+            self._tap = self._src = None
             self._listener = None
 
 
