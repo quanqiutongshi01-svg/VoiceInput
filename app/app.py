@@ -213,7 +213,7 @@ from sounds import play  # noqa: E402  柔和提示音(带蜂鸣兜底)
 # 界面层(悬浮条/设置窗口/动画控件/历史)在 ui.py
 from ui import Overlay, SettingsDialog, HistoryDialog  # noqa: E402
 
-VERSION = "3.5.9"
+VERSION = "3.6.0"
 
 
 def brand_pixmap(size):
@@ -260,6 +260,7 @@ class Bridge(QObject):
     busy = Signal(str)              # 悬浮条忙碌提示
     xfer_in = Signal(str, str, str) # 收到快传(kind, from, payload)
     xfer_peers = Signal(list)       # 在线设备表变化
+    xfer_offer = Signal(str, str, str, int)  # 对方请求发送(offer_id, from, name, size)
     perm_needed = Signal(str)       # 缺 macOS 输入监控权限
 
 
@@ -297,6 +298,7 @@ class VoiceInputApp:
         self.bridge.busy.connect(self.overlay.show_busy, Qt.QueuedConnection)
         self.bridge.xfer_in.connect(self._on_xfer_in, Qt.QueuedConnection)
         self.bridge.xfer_peers.connect(self._on_xfer_peers, Qt.QueuedConnection)
+        self.bridge.xfer_offer.connect(self._on_xfer_offer, Qt.QueuedConnection)
         self.bridge.perm_needed.connect(self._on_perm_needed, Qt.QueuedConnection)
 
         self.ready = False
@@ -438,9 +440,12 @@ class VoiceInputApp:
         self._act_log = QAction("打开日志")
         self._act_log.triggered.connect(self._open_log)
         self._menu.addAction(self._act_log)
-        self._act_xfer = QAction("家庭快传…")
+        self._act_xfer = QAction("家庭快传 · 发送…")
         self._act_xfer.triggered.connect(self._open_transfer)
         self._menu.addAction(self._act_xfer)
+        self._act_inbox = QAction("家庭快传 · 收件箱…")
+        self._act_inbox.triggered.connect(self._open_inbox)
+        self._menu.addAction(self._act_inbox)
         self._menu.addSeparator()
         self._act_history = QAction("最近听写…")
         self._act_history.triggered.connect(self._open_history)
@@ -671,7 +676,8 @@ class VoiceInputApp:
             self._xfer = TransferService(
                 tc,
                 on_incoming=lambda k, f, p: self.bridge.xfer_in.emit(k, f, p),
-                on_peers=lambda ps: self.bridge.xfer_peers.emit(ps))
+                on_peers=lambda ps: self.bridge.xfer_peers.emit(ps),
+                on_offer=lambda oid, f, n, sz: self.bridge.xfer_offer.emit(oid, f, n, sz))
             self._xfer.start()
             if self._xfer.error:
                 self.bridge.notify.emit("快传启动异常", self._xfer.error, 6000)
@@ -716,6 +722,31 @@ class VoiceInputApp:
             except Exception:
                 traceback.print_exc()
 
+    def _open_inbox(self):
+        if not self._xfer or getattr(self._xfer, "error", ""):
+            QMessageBox.information(None, "收件箱",
+                                    getattr(self._xfer, "error", "") or "快传未就绪")
+            return
+        from transfer_ui import InboxDialog
+
+        InboxDialog(self._xfer).exec()
+
+    def _on_xfer_offer(self, offer_id, sender, name, size):
+        from transfer_ui import human_size
+
+        box = QMessageBox(QMessageBox.Question, "家庭快传",
+                          f"{sender} 想发给你:\n\n{name}  ({human_size(size)})\n\n接收吗?",
+                          QMessageBox.NoButton)
+        yes = box.addButton("接收", QMessageBox.AcceptRole)
+        box.addButton("拒绝", QMessageBox.RejectRole)
+        box.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        box.exec()
+        accept = box.clickedButton() is yes
+        try:
+            self._xfer.resolve_offer(offer_id, accept)
+        except Exception:
+            traceback.print_exc()
+
     def _on_xfer_peers(self, peers):
         if self._xfer_dialog and self._xfer_dialog.isVisible():
             self._xfer_dialog.refresh_peers(peers)
@@ -737,8 +768,17 @@ class VoiceInputApp:
 
             name = _os.path.basename(payload)
             self.bridge.notify.emit(
-                f"{frm} 发来文件", f"{name}\n已存到快传文件夹", 6000)
+                f"{frm} 发来文件", f"{name}\n已存到收件夹,托盘菜单「收件箱」可打开", 7000)
             self.overlay.show_done(f"收到文件:{name}", False)
+            # 自动打开(可选):后缀在 auto_open_ext 里就直接打开
+            exts = [e.lower().lstrip(".") for e in
+                    ((self.cfg.get("transfer") or {}).get("auto_open_ext") or [])]
+            if exts and _os.path.splitext(name)[1].lstrip(".").lower() in exts:
+                try:
+                    from transfer_ui import open_path
+                    open_path(payload)
+                except Exception:
+                    traceback.print_exc()
 
     def _do_polish(self):
         """润色热键:取选中文字→热词+LLM修正→原地替换(覆盖选区)。"""

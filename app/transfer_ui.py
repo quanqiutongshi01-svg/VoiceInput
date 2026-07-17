@@ -1,24 +1,64 @@
-"""听晓快传窗口:拖文件/贴文字进来 → 选设备 → 发送。macOS 风格深色。"""
+"""听晓快传界面:发送(暂存卡片+多文件+进度+历史)、收件箱(打开文件/文件夹)。"""
 import os
+import subprocess
+import sys
 
-from PySide6.QtCore import Qt, Signal, QMimeData
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QDragEnterEvent, QDropEvent
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QDialog, QHBoxLayout, QLabel, QListWidget,
-    QListWidgetItem, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
+    QApplication, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QMessageBox,
+    QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QTabWidget,
     QVBoxLayout, QWidget,
 )
 
 from ui import QSS, ui_font
 
-DROP_QSS = QSS + """
+
+def open_path(path):
+    try:
+        if sys.platform == "win32":
+            os.startfile(path)  # noqa
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+        else:
+            subprocess.Popen(["xdg-open", path])
+    except Exception as e:
+        print(f"[transfer_ui] 打开失败 {path}: {e}")
+
+
+def reveal_path(path):
+    try:
+        if sys.platform == "win32":
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", path])
+        else:
+            open_path(os.path.dirname(path))
+    except Exception:
+        open_path(os.path.dirname(path))
+
+
+def human_size(n):
+    for u in ("B", "KB", "MB", "GB"):
+        if n < 1024 or u == "GB":
+            return f"{n:.0f}{u}" if u == "B" else f"{n:.1f}{u}"
+        n /= 1024
+
+
+XFER_QSS = QSS + """
 #dropzone { background: #2c2c2e; border: 2px dashed #48484a; border-radius: 12px;
             color: #98989e; font-size: 14px; }
 #dropzone[hot="true"] { border-color: #0a84ff; color: #0a84ff; background: #23324a; }
+#chip { background: #3a3a3c; border-radius: 8px; }
 QPlainTextEdit { background: #2c2c2e; border: 1px solid #3a3a3c; border-radius: 8px;
                  color: #f2f2f7; padding: 6px; font-size: 13px; }
-QProgressBar { background: #2c2c2e; border: none; border-radius: 4px; height: 6px; }
+QProgressBar { background: #2c2c2e; border: none; border-radius: 4px; height: 6px; text-align: center; }
 QProgressBar::chunk { background: #0a84ff; border-radius: 4px; }
+QTabWidget::pane { border: none; }
+QTabBar::tab { background: transparent; color: #98989e; padding: 6px 14px; }
+QTabBar::tab:selected { color: #f2f2f7; border-bottom: 2px solid #0a84ff; }
+#xbtn { background: transparent; color: #98989e; border: none; font-size: 16px; padding: 0 6px; }
+#xbtn:hover { color: #ff5252; }
 """
 
 
@@ -26,92 +66,137 @@ class DropZone(QLabel):
     dropped = Signal(list)
 
     def __init__(self):
-        super().__init__("把文件拖到这里,或在下面贴文字")
+        super().__init__("把文件拖到这里(可一次拖多个)")
         self.setObjectName("dropzone")
         self.setAlignment(Qt.AlignCenter)
-        self.setMinimumHeight(120)
+        self.setMinimumHeight(96)
         self.setAcceptDrops(True)
 
     def dragEnterEvent(self, e: QDragEnterEvent):
         if e.mimeData().hasUrls():
             e.acceptProposedAction()
             self.setProperty("hot", True)
-            self.style().unpolish(self)
-            self.style().polish(self)
+            self.style().unpolish(self); self.style().polish(self)
 
     def dragLeaveEvent(self, _e):
         self.setProperty("hot", False)
-        self.style().unpolish(self)
-        self.style().polish(self)
+        self.style().unpolish(self); self.style().polish(self)
 
     def dropEvent(self, e: QDropEvent):
         self.setProperty("hot", False)
-        self.style().unpolish(self)
-        self.style().polish(self)
-        paths = [u.toLocalFile() for u in e.mimeData().urls() if u.isLocalFile()]
+        self.style().unpolish(self); self.style().polish(self)
+        paths = [u.toLocalFile() for u in e.mimeData().urls()
+                 if u.isLocalFile() and os.path.isfile(u.toLocalFile())]
         if paths:
             self.dropped.emit(paths)
 
 
-class QuickTransferDialog(QDialog):
-    """service: TransferService 实例。send 在后台线程,进度经信号回主线程。"""
+class Chip(QFrame):
+    """暂存的一个文件:名字+大小+进度+×删除。"""
+    remove = Signal(str)
 
-    progress_sig = Signal(int, int)
-    result_sig = Signal(bool, str)
+    def __init__(self, path):
+        super().__init__()
+        self.setObjectName("chip")
+        self.path = path
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(10, 6, 6, 6)
+        name = os.path.basename(path)
+        try:
+            sz = human_size(os.path.getsize(path))
+        except OSError:
+            sz = "?"
+        self.label = QLabel(f"{name}  ·  {sz}")
+        self.label.setStyleSheet("color:#f2f2f7;font-size:13px;")
+        self.bar = QProgressBar()
+        self.bar.setMaximumWidth(90)
+        self.bar.setVisible(False)
+        self.bar.setTextVisible(False)
+        self.xbtn = QPushButton("✕")
+        self.xbtn.setObjectName("xbtn")
+        self.xbtn.setFixedWidth(28)
+        self.xbtn.clicked.connect(lambda: self.remove.emit(self.path))
+        lay.addWidget(self.label, 1)
+        lay.addWidget(self.bar)
+        lay.addWidget(self.xbtn)
+
+    def set_progress(self, sent, total):
+        self.bar.setVisible(True)
+        self.xbtn.setVisible(False)
+        if total > 0:
+            self.bar.setRange(0, total); self.bar.setValue(sent)
+        else:
+            self.bar.setRange(0, 0)
+
+    def set_done(self, ok):
+        self.bar.setVisible(False)
+        self.label.setText(("✓ " if ok else "✗ ") + self.label.text())
+        self.label.setStyleSheet("color:%s;font-size:13px;" % ("#30d158" if ok else "#ff5252"))
+
+
+class QuickTransferDialog(QDialog):
+    progress_sig = Signal(str, int, int)     # path, sent, total
+    item_result_sig = Signal(str, bool, str)  # path, ok, err
+    all_done_sig = Signal(str)
 
     def __init__(self, service, parent=None):
         super().__init__(parent)
         self.service = service
-        self.files = []
+        self.chips = {}      # path -> Chip
         self.setWindowTitle("听晓快传")
-        self.setMinimumSize(420, 520)
-        self.setStyleSheet(DROP_QSS)
+        self.setMinimumSize(440, 560)
+        self.setStyleSheet(XFER_QSS)
         self.setFont(ui_font(13))
 
-        title = QLabel("发送到")
-        title.setStyleSheet("font-size:13px;color:#98989e;")
-        self.peer_box = QComboBox()
-        self.refresh_peers(service.peers())
+        tabs = QTabWidget()
+        tabs.addTab(self._send_tab(), "发送")
+        tabs.addTab(self._history_tab("sent", "发送记录"), "发送记录")
+        root = QVBoxLayout(self)
+        root.setContentsMargins(14, 12, 14, 12)
+        root.addWidget(tabs)
 
-        self.drop = DropZone()
-        self.drop.dropped.connect(self._add_files)
-        self.file_label = QLabel("")
-        self.file_label.setProperty("dim", True)
-        self.file_label.setWordWrap(True)
+        self.progress_sig.connect(self._on_progress)
+        self.item_result_sig.connect(self._on_item_result)
+        self.all_done_sig.connect(self._on_all_done)
+
+    # ---- 发送页 ----
+
+    def _send_tab(self):
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(0, 8, 0, 0)
+        v.addWidget(QLabel("发送到"))
+        self.peer_box = QComboBox()
+        self.refresh_peers(self.service.peers())
+        v.addWidget(self.peer_box)
+
+        drop = DropZone()
+        drop.dropped.connect(self._add_files)
+        v.addWidget(drop)
+
+        # 暂存卡片区(可滚动)
+        self.stage = QVBoxLayout()
+        self.stage.setSpacing(6)
+        self.stage.addStretch(1)
+        holder = QWidget(); holder.setLayout(self.stage)
+        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(holder)
+        scroll.setMinimumHeight(140)
+        v.addWidget(scroll, 1)
 
         self.text = QPlainTextEdit()
-        self.text.setPlaceholderText("要发送的文字(和文件二选一或都发)")
-        self.text.setMaximumHeight(90)
+        self.text.setPlaceholderText("也可以直接发一段文字")
+        self.text.setMaximumHeight(70)
+        v.addWidget(self.text)
 
-        self.bar = QProgressBar()
-        self.bar.setVisible(False)
-        self.bar.setTextVisible(False)
-
+        row = QHBoxLayout()
+        row.addWidget(QLabel(f"本机:{self.service.name}"))
+        row.addStretch(1)
         self.send_btn = QPushButton("发送")
         self.send_btn.setProperty("primary", True)
         self.send_btn.clicked.connect(self._send)
-        close_btn = QPushButton("关闭")
-        close_btn.clicked.connect(self.reject)
-        btns = QHBoxLayout()
-        btns.addWidget(QLabel(f"本机:{service.name}"))
-        btns.addStretch(1)
-        btns.addWidget(close_btn)
-        btns.addWidget(self.send_btn)
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(16, 14, 16, 14)
-        root.addWidget(title)
-        root.addWidget(self.peer_box)
-        root.addSpacing(8)
-        root.addWidget(self.drop)
-        root.addWidget(self.file_label)
-        root.addSpacing(6)
-        root.addWidget(self.text, 1)
-        root.addWidget(self.bar)
-        root.addLayout(btns)
-
-        self.progress_sig.connect(self._on_progress)
-        self.result_sig.connect(self._on_result)
+        row.addWidget(self.send_btn)
+        v.addLayout(row)
+        return w
 
     def refresh_peers(self, peers):
         cur = self.peer_box.currentData() if self.peer_box.count() else None
@@ -124,67 +209,150 @@ class QuickTransferDialog(QDialog):
             for i in range(self.peer_box.count()):
                 d = self.peer_box.itemData(i)
                 if d and d.get("id") == cur.get("id"):
-                    self.peer_box.setCurrentIndex(i)
-                    break
+                    self.peer_box.setCurrentIndex(i); break
 
     def _add_files(self, paths):
-        self.files = list(paths)
-        n = len(paths)
-        names = ", ".join(os.path.basename(p) for p in paths[:3])
-        self.file_label.setText(f"已选 {n} 个:{names}" + (" …" if n > 3 else ""))
+        for p in paths:
+            if p in self.chips:
+                continue
+            chip = Chip(p)
+            chip.remove.connect(self._remove_file)
+            self.chips[p] = chip
+            self.stage.insertWidget(self.stage.count() - 1, chip)
+
+    def _remove_file(self, path):
+        chip = self.chips.pop(path, None)
+        if chip:
+            chip.setParent(None)
 
     def _send(self):
         import threading
 
         peer = self.peer_box.currentData()
         if not peer:
-            QMessageBox.information(self, "快传", "还没发现对方设备。请确认对方电脑也开着听晓,并连在同一个 WiFi。")
+            QMessageBox.information(self, "快传", "还没发现对方设备。确认对方也开着听晓、连同一 WiFi。")
             return
+        files = list(self.chips.keys())
         text = self.text.toPlainText().strip()
-        if not self.files and not text:
+        if not files and not text:
             QMessageBox.information(self, "快传", "先拖入文件,或输入要发送的文字。")
             return
         self.send_btn.setEnabled(False)
-        self.bar.setVisible(True)
-        self.bar.setRange(0, 0)  # 忙碌态,发文件时切确定进度
 
         def work():
-            try:
-                if text:
-                    ok, err = self.service.send_text(peer, text)
-                    if not ok:
-                        return self.result_sig.emit(False, f"文字发送失败:{err}")
-                for i, path in enumerate(self.files):
-                    self.bar_range_reset()
-                    ok, err = self.service.send_file(
-                        peer, path,
-                        progress=lambda s, t: self.progress_sig.emit(s, t))
-                    if not ok:
-                        return self.result_sig.emit(
-                            False, f"{os.path.basename(path)} 发送失败:{err}")
-                self.result_sig.emit(True, "发送完成 ✓")
-            except Exception as e:
-                self.result_sig.emit(False, f"发送出错:{e}")
+            if text:
+                ok, err = self.service.send_text(peer, text)
+                self.item_result_sig.emit("__text__", ok, err)
+            for path in files:
+                ok, err = self.service.send_file(
+                    peer, path,
+                    progress=lambda s, t, p=path: self.progress_sig.emit(p, s, t))
+                self.item_result_sig.emit(path, ok, err)
+            self.all_done_sig.emit("")
 
         threading.Thread(target=work, daemon=True).start()
 
-    def bar_range_reset(self):
-        self.progress_sig.emit(0, 0)
+    def _on_progress(self, path, sent, total):
+        c = self.chips.get(path)
+        if c:
+            c.set_progress(sent, total)
 
-    def _on_progress(self, sent, total):
-        if total <= 0:
-            self.bar.setRange(0, 0)
-        else:
-            self.bar.setRange(0, total)
-            self.bar.setValue(sent)
+    def _on_item_result(self, path, ok, err):
+        if path == "__text__":
+            if ok:
+                self.text.clear()
+            elif err:
+                self.setWindowTitle(f"听晓快传 — 文字{err}")
+            return
+        c = self.chips.get(path)
+        if c:
+            c.set_done(ok)
+            if not ok and err:
+                c.label.setText(c.label.text() + f"  ({err})")
 
-    def _on_result(self, ok, msg):
-        self.bar.setVisible(False)
+    def _on_all_done(self, _):
         self.send_btn.setEnabled(True)
-        if ok:
-            self.text.clear()
-            self.files = []
-            self.file_label.setText("")
-            self.setWindowTitle("听晓快传 — " + msg)
+        self.setWindowTitle("听晓快传 — 完成")
+
+    # ---- 历史页 ----
+
+    def _history_tab(self, kind, _title):
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(0, 8, 0, 0)
+        recs = self.service.history(kind)
+        if not recs:
+            v.addWidget(QLabel("暂无记录"))
+        for r in recs:
+            ts = r.get("ts", "")
+            when = f"{ts[4:6]}-{ts[6:8]} {ts[9:11]}:{ts[11:13]}" if len(ts) >= 13 else ""
+            to = r.get("to", "")
+            desc = r.get("name") or r.get("text", "")
+            lbl = QLabel(f"{when}  →{to}  {desc[:40]}")
+            lbl.setStyleSheet("color:#c7c7cc;font-size:12px;padding:4px 2px;"
+                              "border-bottom:1px solid #3a3a3c;")
+            v.addWidget(lbl)
+        v.addStretch(1)
+        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(w)
+        return scroll
+
+
+class InboxDialog(QDialog):
+    """收件箱:接收记录 + 打开文件/所在文件夹 + 打开收件夹。"""
+
+    def __init__(self, service, parent=None):
+        super().__init__(parent)
+        self.service = service
+        self.setWindowTitle("听晓快传 · 收件箱")
+        self.setMinimumSize(480, 560)
+        self.setStyleSheet(XFER_QSS)
+        self.setFont(ui_font(13))
+
+        top = QHBoxLayout()
+        top.addWidget(QLabel(f"收件夹:{service.save_dir}"))
+        top.addStretch(1)
+        openf = QPushButton("打开收件夹")
+        openf.clicked.connect(lambda: open_path(service.save_dir))
+        top.addWidget(openf)
+
+        listw = QWidget()
+        lv = QVBoxLayout(listw)
+        lv.setContentsMargins(0, 6, 0, 0)
+        recs = service.history("recv")
+        if not recs:
+            lv.addWidget(QLabel("还没有收到任何东西"))
+        for r in recs:
+            lv.addWidget(self._row(r))
+        lv.addStretch(1)
+        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(listw)
+
+        close = QPushButton("关闭"); close.clicked.connect(self.reject)
+        bottom = QHBoxLayout(); bottom.addStretch(1); bottom.addWidget(close)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(14, 12, 14, 12)
+        root.addLayout(top)
+        root.addWidget(scroll, 1)
+        root.addLayout(bottom)
+
+    def _row(self, r):
+        f = QFrame(); f.setObjectName("chip")
+        h = QHBoxLayout(f); h.setContentsMargins(10, 8, 8, 8)
+        ts = r.get("ts", "")
+        when = f"{ts[4:6]}-{ts[6:8]} {ts[9:11]}:{ts[11:13]}" if len(ts) >= 13 else ""
+        frm = r.get("from", "")
+        if r.get("kind") == "file":
+            name = r.get("name", "文件")
+            info = QLabel(f"{name}\n{when} · 来自 {frm} · {human_size(r.get('size',0))}")
         else:
-            QMessageBox.warning(self, "快传", msg)
+            info = QLabel(f"[文字] {r.get('text','')[:30]}\n{when} · 来自 {frm}")
+        info.setStyleSheet("color:#f2f2f7;font-size:13px;")
+        h.addWidget(info, 1)
+        path = r.get("path")
+        if path:
+            of = QPushButton("打开"); of.setFixedWidth(52)
+            of.clicked.connect(lambda _=0, p=path: open_path(p))
+            rv = QPushButton("所在文件夹"); rv.setFixedWidth(96)
+            rv.clicked.connect(lambda _=0, p=path: reveal_path(p))
+            h.addWidget(of); h.addWidget(rv)
+        return f

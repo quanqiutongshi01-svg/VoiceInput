@@ -90,6 +90,8 @@
   "transfer": {
     "device_name": "",
     "family_code": "",
-    "save_dir": "~/Downloads"
+    "save_dir": "~/Downloads",
+    "auto_accept": false,
+    "auto_open_ext": []
   }
 }
