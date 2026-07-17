@@ -108,17 +108,48 @@ except Exception as e:  # 日志都建不起来:目录只读等
     sys.exit(1)
 
 
-def _single_instance_guard():
-    """防止双击两次 → 两个键盘钩子、每句注入两遍。"""
-    if sys.platform != "win32":
-        return None
-    import ctypes
-
-    handle = ctypes.windll.kernel32.CreateMutexW(None, False, "Global\\VoiceInputLeoMutex")
-    if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+def _already_running_dialog():
+    """告诉用户已有实例(mac 用 osascript,win 用原生弹窗)。"""
+    if sys.platform == "win32":
         _native_msgbox("听晓已经在运行了(看屏幕右下角托盘)。")
+    elif sys.platform == "darwin":
+        try:
+            import subprocess
+
+            subprocess.Popen(
+                ["osascript", "-e",
+                 'display notification "听晓已经在运行(看菜单栏图标)" with title "听晓"'])
+        except Exception:
+            pass
+
+
+def _single_instance_guard():
+    """跨平台单实例:同时只允许一个听晓在跑。
+    Windows 用命名互斥;其他平台用 flock 文件锁(进程退出即释放,自动清理死锁)。"""
+    if sys.platform == "win32":
+        import ctypes
+
+        handle = ctypes.windll.kernel32.CreateMutexW(None, False, "Global\\VoiceInputLeoMutex")
+        if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+            _already_running_dialog()
+            sys.exit(0)
+        return handle
+    # POSIX(macOS/Linux):文件锁
+    try:
+        import fcntl
+        import tempfile
+
+        f = open(os.path.join(tempfile.gettempdir(), "tingxiao.lock"), "w")
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        f.write(str(os.getpid()))
+        f.flush()
+        return f  # 保持文件句柄存活 = 持有锁,进程退出自动释放
+    except OSError:
+        print("[app] 已有听晓实例在运行,本次退出")
+        _already_running_dialog()
         sys.exit(0)
-    return handle  # 保持引用,进程退出自动释放
+    except Exception:
+        return None  # 拿不到锁机制时不阻塞启动(宁可多开也别打不开)
 
 
 _MUTEX = _single_instance_guard()
@@ -168,7 +199,7 @@ from sounds import play  # noqa: E402  柔和提示音(带蜂鸣兜底)
 # 界面层(悬浮条/设置窗口/动画控件/历史)在 ui.py
 from ui import Overlay, SettingsDialog, HistoryDialog  # noqa: E402
 
-VERSION = "3.5.4"
+VERSION = "3.5.5"
 
 
 # ---------- 信号桥:非 Qt 线程 → Qt 主线程(int 均为会话代数,-1=应用级) ----------
