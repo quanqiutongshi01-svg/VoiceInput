@@ -30,38 +30,49 @@ def refresh_devices():
     sd._initialize()
 
 
-def pick_device(name_contains: str):
-    """返回 (device_index or None)。name_contains 为空则用系统默认。"""
+# Windows 音频接口优先级:WASAPI 最稳,WDM-KS 最容易开不动(蓝牙耳机常炸)
+_API_RANK = ["WASAPI", "DirectSound", "MME", "WDM-KS", "ASIO"]
+
+
+def _api_rank(api: str) -> int:
+    for i, k in enumerate(_API_RANK):
+        if k.lower() in api.lower():
+            return i
+    return len(_API_RANK)
+
+
+def pick_devices(name_contains: str):
+    """返回按音频接口稳定性排序的候选 [(index, name, api, sr)],供逐个尝试。
+    name_contains 为空则枚举系统默认输入设备的同名各接口实例。"""
+    devs = list_input_devices()
     if name_contains:
-        cands = []
-        for i, name, api, sr in list_input_devices():
-            if name_contains.lower() in name.lower():
-                cands.append((i, name, api, sr))
+        cands = [d for d in devs if name_contains.lower() in d[1].lower()]
         if not cands:
             raise RuntimeError(
                 f"没有找到名称包含「{name_contains}」的输入设备。"
-                f"请确认耳机已连接,或运行 python main.py --list-devices 查看设备列表。"
-            )
-        # Windows 上优先 WASAPI(延迟低、行为稳定)
-        cands.sort(key=lambda c: 0 if "WASAPI" in c[2] else 1)
-        i, name, api, sr = cands[0]
-        print(f"[recorder] 使用设备 #{i} {name} ({api}, 默认{sr}Hz)")
-        return i
-    info = sd.query_devices(kind="input")
-    print(f"[recorder] 使用系统默认输入: {info['name']} (默认{int(info['default_samplerate'])}Hz)")
-    return None
+                f"请确认耳机已连接,或在设置里重选麦克风。")
+    else:
+        try:
+            default_name = sd.query_devices(kind="input")["name"]
+        except Exception:
+            default_name = ""
+        # 默认设备的核心名(去掉接口后缀噪声),匹配它的所有接口实例
+        key = default_name.split("(")[0].strip()[:12]
+        cands = [d for d in devs if key and key in d[1]] or devs
+    cands = sorted(cands, key=lambda d: (_api_rank(d[2]), d[0]))
+    return cands
 
 
-def _resolve_samplerate(device):
-    """优先让系统直接给 16k(WASAPI auto_convert),失败则用设备默认采样率。
+def _resolve_samplerate(device, api):
+    """优先让系统直接给 16k(仅 WASAPI 支持 auto_convert),失败则用设备默认采样率。
     返回 (samplerate, extra_settings)。"""
-    if sys.platform == "win32":
+    is_wasapi = sys.platform == "win32" and "wasapi" in (api or "").lower()
+    if is_wasapi:
         try:
             extra = sd.WasapiSettings(auto_convert=True)
             sd.check_input_settings(
                 device=device, samplerate=16000, channels=1, dtype="float32",
-                extra_settings=extra,
-            )
+                extra_settings=extra)
             return 16000, extra
         except Exception:
             pass
@@ -70,11 +81,11 @@ def _resolve_samplerate(device):
         return 16000, None
     except Exception:
         pass
-    if device is not None:
-        info = sd.query_devices(device)
-    else:
-        info = sd.query_devices(kind="input")
-    return int(info["default_samplerate"]), None
+    try:
+        info = sd.query_devices(device) if device is not None else sd.query_devices(kind="input")
+        return int(info["default_samplerate"]), None
+    except Exception:
+        return 48000, None
 
 
 class Recorder:
@@ -101,12 +112,23 @@ class Recorder:
 
     def open(self):
         self._close()
-        device = pick_device(self.name_contains)
-        self.sample_rate, extra = _resolve_samplerate(device)
+        cands = pick_devices(self.name_contains)
+        last_err = None
+        for idx, (device, name, api, _sr) in enumerate(cands):
+            try:
+                self._open_on(device, api)
+                print(f"[recorder] 使用设备 #{device} {name} ({api}) @ {self.sample_rate}Hz")
+                return
+            except Exception as e:
+                last_err = e
+                print(f"[recorder] {name} ({api}) 打开失败,尝试下一个接口: {e}")
+                self._close()
+        raise RuntimeError(f"所有音频接口都打不开麦克风。最后错误: {last_err}")
+
+    def _open_on(self, device, api):
+        self.sample_rate, extra = _resolve_samplerate(device, api)
         self._max_frames = int(self.max_seconds * self.sample_rate)
         self._preroll_target = int(0.3 * self.sample_rate)
-        print(f"[recorder] 以 {self.sample_rate}Hz 打开音频流"
-              + ("(系统转换到16k)" if self.sample_rate == 16000 and extra else ""))
 
         def cb(indata, frames, time_info, status):
             with self._lock:
