@@ -199,7 +199,36 @@ from sounds import play  # noqa: E402  柔和提示音(带蜂鸣兜底)
 # 界面层(悬浮条/设置窗口/动画控件/历史)在 ui.py
 from ui import Overlay, SettingsDialog, HistoryDialog  # noqa: E402
 
-VERSION = "3.5.5"
+VERSION = "3.5.6"
+
+
+def brand_pixmap(size):
+    """听晓品牌图标:深色圆角方块 + 红→蓝彩色声波。菜单栏/程序坞/启动台统一。"""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    m = size * 0.08
+    from PySide6.QtCore import QRectF
+
+    r = QRectF(m, m, size - 2 * m, size - 2 * m)
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor(28, 28, 32))
+    p.drawRoundedRect(r, size * 0.24, size * 0.24)
+    cols = [QColor(255, 69, 58), QColor(255, 149, 90), QColor(255, 214, 10),
+            QColor(90, 200, 255), QColor(10, 132, 255)]
+    hs = [0.30, 0.50, 0.66, 0.50, 0.30]
+    bw = size * 0.082
+    gap = size * 0.052
+    x = (size - (5 * bw + 4 * gap)) / 2
+    cy = size * 0.5
+    for c, h in zip(cols, hs):
+        p.setBrush(c)
+        hh = size * h * 0.78
+        p.drawRoundedRect(QRectF(x, cy - hh / 2, bw, hh), bw / 2, bw / 2)
+        x += bw + gap
+    p.end()
+    return pm
 
 
 # ---------- 信号桥:非 Qt 线程 → Qt 主线程(int 均为会话代数,-1=应用级) ----------
@@ -225,6 +254,7 @@ class VoiceInputApp:
     def __init__(self):
         self.app = QApplication(sys.argv)
         self.app.setQuitOnLastWindowClosed(False)
+        self.app.setWindowIcon(QIcon(brand_pixmap(256)))  # 程序坞/窗口图标
         try:
             self.cfg = load_config()  # 失败时它会 print + sys.exit
         except SystemExit:
@@ -361,20 +391,8 @@ class VoiceInputApp:
 
     # -- 托盘 --
 
-    def _tray_icon(self, color):
-        pm = QPixmap(64, 64)
-        pm.fill(Qt.transparent)
-        p = QPainter(pm)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.setPen(Qt.NoPen)
-        p.setBrush(QColor(color))
-        p.drawRoundedRect(22, 8, 20, 32, 10, 10)
-        p.setBrush(Qt.NoBrush)
-        p.setPen(QPen(QColor(color), 5))
-        p.drawArc(14, 22, 36, 26, 180 * 16, 180 * 16)
-        p.drawLine(32, 48, 32, 56)
-        p.end()
-        return QIcon(pm)
+    def _tray_icon(self, _color=None):
+        return QIcon(brand_pixmap(64))
 
     def _build_tray(self):
         # 菜单和 QAction 必须挂在 self 上,否则被 Python GC 回收后菜单失效
