@@ -24,14 +24,27 @@ class PrintInjector:
 
 
 class MacInjector(PrintInjector):
+    """剪贴板 + Cmd+V:对中文/长文本最可靠;0.6s 后恢复原剪贴板文本。
+    需要在 系统设置→隐私与安全性→辅助功能 里授权运行它的终端/应用。"""
+
     def inject(self, text: str):
         import subprocess
+        import threading
 
-        safe = text.replace("\\", "\\\\").replace('"', '\\"')
+        old = subprocess.run(["pbpaste"], capture_output=True).stdout
+        subprocess.run(["pbcopy"], input=text.encode("utf-8"))
+        time.sleep(0.08)
         subprocess.run(
-            ["osascript", "-e", f'tell application "System Events" to keystroke "{safe}"'],
+            ["osascript", "-e",
+             'tell application "System Events" to keystroke "v" using {command down}'],
             check=False,
         )
+
+        def restore():
+            time.sleep(0.6)
+            subprocess.run(["pbcopy"], input=old)
+
+        threading.Thread(target=restore, daemon=True).start()
 
 
 class WindowsInjector:

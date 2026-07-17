@@ -168,7 +168,7 @@ from sounds import play  # noqa: E402  柔和提示音(带蜂鸣兜底)
 # 界面层(悬浮条/设置窗口/动画控件/历史)在 ui.py
 from ui import Overlay, SettingsDialog, HistoryDialog  # noqa: E402
 
-VERSION = "3.2.0"
+VERSION = "3.2.1"
 
 
 # ---------- 信号桥:非 Qt 线程 → Qt 主线程(int 均为会话代数,-1=应用级) ----------
@@ -298,26 +298,18 @@ class VoiceInputApp:
         threading.Thread(target=load, daemon=True).start()
 
     def _bind_hotkey(self, hotkey):
-        """先绑新钩子,成功后再摘旧钩子——绑定失败不会落入'无热键'状态。"""
-        import keyboard
+        from hotkeys import make_hotkeys
 
-        new_hooks = [
-            keyboard.on_press_key(hotkey, lambda _: self.bridge.pressed.emit(), suppress=True),
-            keyboard.on_release_key(hotkey, lambda _: self.bridge.released.emit(), suppress=True),
-        ]
-        self._unbind_hotkey()
-        self._hooks = new_hooks
+        if not hasattr(self, "_hk"):
+            self._hk = make_hotkeys()
+        self._hk.bind(hotkey,
+                      lambda: self.bridge.pressed.emit(),
+                      lambda: self.bridge.released.emit())
         self._key_down = False  # 重绑即视为无键按下(丢失的 release 在此清账)
 
     def _unbind_hotkey(self):
-        import keyboard
-
-        for h in self._hooks:
-            try:
-                keyboard.unhook(h)
-            except Exception:
-                pass
-        self._hooks = []
+        if hasattr(self, "_hk"):
+            self._hk.unbind_all()
 
     # -- 托盘 --
 

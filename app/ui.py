@@ -516,7 +516,9 @@ def set_autostart(enable, exe_path):
 
 
 class SettingsDialog(QDialog):
-    VALID_KEYS = ["f9", "f8", "scroll lock", "pause"]
+    VALID_KEYS = (["right option", "right command", "f9", "f8"]
+                  if sys.platform == "darwin"
+                  else ["f9", "f8", "scroll lock", "pause"])
 
     def __init__(self, cfg, devices, data_dir="data", exe_path="", on_reset_overlay=None,
                  version="", parent=None):
