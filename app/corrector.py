@@ -91,7 +91,20 @@ class Corrector:
                 print(f"[corrector] LLM 连续失败,熔断 {self.CIRCUIT_COOLDOWN//60} 分钟(期间纯本地出字)")
         return text
 
-    def _llm(self, text: str) -> str:
+    def polish(self, text: str) -> str:
+        """润色热键用:选中文字→热词+LLM(不做长度门控,超时放宽到8s)。"""
+        self.last_llm_used = False
+        if not text:
+            return text
+        text = self.apply_hotwords(text)
+        if self.enabled and time.time() >= self._circuit_until:
+            fixed = self._llm(text, timeout_override=8)
+            if fixed:
+                self.last_llm_used = True
+                return fixed
+        return text
+
+    def _llm(self, text: str, timeout_override=None) -> str:
         try:
             url = (self.cfg.get("base_url") or "https://api.deepseek.com/v1").rstrip("/") + "/chat/completions"
             body = json.dumps(
@@ -113,7 +126,7 @@ class Corrector:
                     "Authorization": "Bearer " + self.cfg["api_key"],
                 },
             )
-            timeout = float(self.cfg.get("timeout_seconds", 3))
+            timeout = float(timeout_override or self.cfg.get("timeout_seconds", 3))
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             out = data["choices"][0]["message"]["content"].strip()

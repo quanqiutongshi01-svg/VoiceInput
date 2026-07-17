@@ -12,14 +12,18 @@ class _WinHotkeys:
     def __init__(self):
         self._hooks = []
 
-    def bind(self, key, on_down, on_up):
+    def bind_many(self, bindings):
+        """bindings: [(key, on_down, on_up 或 None)]。
+        先全部绑新钩子,成功后再摘旧的——绑定失败不会落入"无热键"状态。"""
         import keyboard
 
-        # 先绑新钩子,成功后再摘旧的——绑定失败不会落入"无热键"状态
-        new = [
-            keyboard.on_press_key(key, lambda _: on_down(), suppress=True),
-            keyboard.on_release_key(key, lambda _: on_up(), suppress=True),
-        ]
+        new = []
+        for key, on_down, on_up in bindings:
+            new.append(keyboard.on_press_key(
+                key, lambda _e, f=on_down: f(), suppress=True))
+            if on_up is not None:
+                new.append(keyboard.on_release_key(
+                    key, lambda _e, f=on_up: f(), suppress=True))
         old = self._hooks
         self._hooks = new
         for h in old:
@@ -55,17 +59,23 @@ class _MacHotkeys:
             "f10": pk.Key.f10,
         }
 
-    def bind(self, key, on_down, on_up):
+    def bind_many(self, bindings):
+        """bindings: [(key, on_down, on_up 或 None)]。单个监听器分发多键。"""
         from pynput import keyboard as pk
 
         keymap = self._keymap()
-        target = keymap.get(str(key).lower())
-        if target is None:
-            raise ValueError(
-                f"macOS 不支持热键「{key}」,可选:{'、'.join(keymap)}")
+        downs, ups = {}, {}
+        for key, on_down, on_up in bindings:
+            target = keymap.get(str(key).lower())
+            if target is None:
+                raise ValueError(
+                    f"macOS 不支持热键「{key}」,可选:{'、'.join(keymap)}")
+            downs[target] = on_down
+            if on_up is not None:
+                ups[target] = on_up
         listener = pk.Listener(
-            on_press=lambda k: on_down() if k == target else None,
-            on_release=lambda k: on_up() if k == target else None,
+            on_press=lambda k: downs[k]() if k in downs else None,
+            on_release=lambda k: ups[k]() if k in ups else None,
         )
         listener.start()
         old = self._listener

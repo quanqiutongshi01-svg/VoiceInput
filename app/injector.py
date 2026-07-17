@@ -225,3 +225,39 @@ class WindowsInjector:
             import threading
 
             threading.Thread(target=restore, daemon=True).start()
+
+
+def grab_selection() -> str:
+    """模拟复制读取当前选中文本(润色热键用)。取不到返回空串。"""
+    if sys.platform == "darwin":
+        import subprocess
+
+        subprocess.run(
+            ["osascript", "-e",
+             'tell application "System Events" to keystroke "c" using {command down}'],
+            check=False)
+        time.sleep(0.3)
+        out = subprocess.run(["pbpaste"], capture_output=True)
+        return out.stdout.decode("utf-8", "replace")
+    if sys.platform == "win32":
+        import keyboard
+
+        keyboard.send("ctrl+c")
+        time.sleep(0.3)
+        ctypes, user32, kernel32 = WindowsInjector._winapi()
+        CF_UNICODETEXT = 13
+        if not WindowsInjector._open_clipboard_retry(user32):
+            return ""
+        try:
+            h = user32.GetClipboardData(CF_UNICODETEXT)
+            if not h:
+                return ""
+            p = kernel32.GlobalLock(h)
+            if not p:
+                return ""
+            text = ctypes.wstring_at(p)
+            kernel32.GlobalUnlock(h)
+            return text
+        finally:
+            user32.CloseClipboard()
+    return ""

@@ -118,6 +118,11 @@ class Overlay(QWidget):
         self._set_state("error", msg, RED)
         self._hide_timer.start(2600)
 
+    def show_busy(self, msg):
+        """润色等后台任务的忙碌态(琥珀色,不自动隐藏)。"""
+        self._llm_badge = False
+        self._set_state("processing", msg, AMBER)
+
     # ---- 内部 ----
 
     def _set_state(self, state, text, color):
@@ -523,7 +528,7 @@ class SettingsDialog(QDialog):
     def __init__(self, cfg, devices, data_dir="data", exe_path="", on_reset_overlay=None,
                  version="", parent=None):
         super().__init__(parent)
-        self.setWindowTitle("语音输入 设置")
+        self.setWindowTitle("听晓 设置")
         self.setMinimumSize(460, 560)
         self.setStyleSheet(QSS)
         self.setFont(ui_font(13))
@@ -543,6 +548,14 @@ class SettingsDialog(QDialog):
         if cur not in self.VALID_KEYS:
             self.hotkey.addItem(cur)
         self.hotkey.setCurrentText(cur)
+
+        self.polish_key = QComboBox()
+        self.polish_key.addItem("不启用", "off")
+        for k in self.VALID_KEYS:
+            self.polish_key.addItem(k, k)
+        pcur = cfg.get("polish_hotkey", "off") or "off"
+        pidx = self.polish_key.findData(pcur)
+        self.polish_key.setCurrentIndex(max(0, pidx))
 
         self.mic = QComboBox()
         self.mic.addItem("系统默认", "")
@@ -595,6 +608,7 @@ class SettingsDialog(QDialog):
         v.addWidget(_header("通用"))
         v.addWidget(_card(
             _row("说话热键", self.hotkey),
+            _row("润色热键", self.polish_key, "任何输入法打的字,选中后按此键,AI帮你修错别字"),
             _row("录音方式", self.record_mode, "长段听写建议用「单击开始」,不用一直按着"),
             _row("提示音", self.beep),
             _row("开机自动启动", self.autostart),
@@ -617,7 +631,7 @@ class SettingsDialog(QDialog):
             _row("本地存档", self.archive_on, f"已用 {size_mb:.0f} MB · 用于持续改进识别,仅存本机"),
             _row("存档位置", btn_data),
         ))
-        about = QLabel(f"语音输入 {version or 'v3'} · 专属微调模型 · 识别全程本地运行")
+        about = QLabel(f"听晓 {version or 'v3'} · 会听会打的私人输入法 · 识别全程本地")
         about.setProperty("dim", True)
         about.setAlignment(Qt.AlignCenter)
         about.setContentsMargins(0, 10, 0, 4)
@@ -660,6 +674,7 @@ class SettingsDialog(QDialog):
             QMessageBox.warning(self, "打开文件夹", f"无法打开存档文件夹:\n{e}")
 
     def apply_to(self, cfg):
+        cfg["polish_hotkey"] = self.polish_key.currentData() or "off"
         cfg["record_mode"] = self.record_mode.currentData() or "hold"
         cfg["hotkey"] = self.hotkey.currentText().strip().lower() or "f9"
         cfg["mic_name_contains"] = self.mic.currentData() or ""

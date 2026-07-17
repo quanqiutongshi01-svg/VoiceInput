@@ -28,7 +28,7 @@ LOG_PATH = os.path.join(LOG_DIR, "voiceinput.log")
 _LOG_FILE = None
 
 
-def _native_msgbox(text, title="语音输入"):
+def _native_msgbox(text, title="听晓"):
     """Qt 起不来时的兜底弹窗(仅 Windows)。"""
     if sys.platform == "win32":
         try:
@@ -116,7 +116,7 @@ def _single_instance_guard():
 
     handle = ctypes.windll.kernel32.CreateMutexW(None, False, "Global\\VoiceInputLeoMutex")
     if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
-        _native_msgbox("语音输入已经在运行了(看屏幕右下角托盘)。")
+        _native_msgbox("听晓已经在运行了(看屏幕右下角托盘)。")
         sys.exit(0)
     return handle  # 保持引用,进程退出自动释放
 
@@ -168,7 +168,7 @@ from sounds import play  # noqa: E402  柔和提示音(带蜂鸣兜底)
 # 界面层(悬浮条/设置窗口/动画控件/历史)在 ui.py
 from ui import Overlay, SettingsDialog, HistoryDialog  # noqa: E402
 
-VERSION = "3.2.1"
+VERSION = "3.3.0"
 
 
 # ---------- 信号桥:非 Qt 线程 → Qt 主线程(int 均为会话代数,-1=应用级) ----------
@@ -182,6 +182,8 @@ class Bridge(QObject):
     status = Signal(str)
     notify = Signal(str, str, int)  # 托盘气泡(标题, 内容, 毫秒)——worker线程安全
     update_found = Signal(dict)     # 远程发现新版本
+    polish = Signal()               # 润色热键
+    busy = Signal(str)              # 悬浮条忙碌提示
 
 
 # ---------- 主控 ----------
@@ -213,6 +215,8 @@ class VoiceInputApp:
             lambda t, m, ms: self.tray.showMessage(t, m, QSystemTrayIcon.Information, ms),
             Qt.QueuedConnection)
         self.bridge.update_found.connect(self._on_update_found, Qt.QueuedConnection)
+        self.bridge.polish.connect(self._do_polish, Qt.QueuedConnection)
+        self.bridge.busy.connect(self.overlay.show_busy, Qt.QueuedConnection)
 
         self.ready = False
         self.recording = False
@@ -223,6 +227,7 @@ class VoiceInputApp:
         self._watch.setInterval(1000)
         self._watch.timeout.connect(self._watch_tick)
         self._pending_update = None  # 远程发现的新版本 info
+        self._polishing = False      # 润色单飞标志
         self._update_timer = QTimer()  # 每24小时静默再查一次
         self._update_timer.setInterval(24 * 3600 * 1000)
         self._update_timer.timeout.connect(
@@ -285,7 +290,7 @@ class VoiceInputApp:
                 self.bridge.status.emit(f"就绪 — 按住 {hk} 说话")
                 print("[app] 就绪")
                 self.bridge.notify.emit(
-                    "语音输入已就绪", f"按住 {hk} 说话,松开出字。图标可能收在托盘 ^ 里。", 4000)
+                    "听晓已就绪", f"按住 {hk} 说话,松开出字。图标可能收在托盘 ^ 里。", 4000)
                 self._run_flywheel()
                 self._check_remote_update()
             except Exception as e:
@@ -302,9 +307,13 @@ class VoiceInputApp:
 
         if not hasattr(self, "_hk"):
             self._hk = make_hotkeys()
-        self._hk.bind(hotkey,
-                      lambda: self.bridge.pressed.emit(),
-                      lambda: self.bridge.released.emit())
+        bindings = [(hotkey,
+                     lambda: self.bridge.pressed.emit(),
+                     lambda: self.bridge.released.emit())]
+        pk = self.cfg.get("polish_hotkey", "")
+        if pk and pk != "off" and pk != hotkey:
+            bindings.append((pk, lambda: self.bridge.polish.emit(), None))
+        self._hk.bind_many(bindings)
         self._key_down = False  # 重绑即视为无键按下(丢失的 release 在此清账)
 
     def _unbind_hotkey(self):
@@ -366,12 +375,12 @@ class VoiceInputApp:
         self._act_quit.triggered.connect(self._quit)
         self._menu.addAction(self._act_quit)
         self.tray.setContextMenu(self._menu)
-        self.tray.setToolTip("语音输入")
+        self.tray.setToolTip("听晓")
         self.tray.show()
 
     def _set_tray_tip(self, text):
         self._tip_action.setText(text)
-        self.tray.setToolTip(f"语音输入 — {text}")
+        self.tray.setToolTip(f"听晓 — {text}")
 
     def _open_log(self):
         try:
@@ -505,7 +514,7 @@ class VoiceInputApp:
         state = "云端润色:开" if checked else "云端润色:关(纯本地)"
         print(f"[app] {state}")
         try:
-            self.tray.showMessage("语音输入", state, QSystemTrayIcon.Information, 2000)
+            self.tray.showMessage("听晓", state, QSystemTrayIcon.Information, 2000)
         except Exception:
             pass
 
@@ -550,6 +559,38 @@ class VoiceInputApp:
                 traceback.print_exc()
         # 复用本地安装流程(确认框/备份/配置合并/重启提示都在里面)
         self._install_update(zip_path=tmp)
+
+    def _do_polish(self):
+        """润色热键:取选中文字→热词+LLM修正→原地替换(覆盖选区)。"""
+        if not self.ready or self._polishing or self.recording:
+            return
+        self._polishing = True
+
+        def work():
+            try:
+                from injector import grab_selection
+
+                text = grab_selection()
+                if not text or not text.strip():
+                    self.bridge.error.emit(-1, "先选中要润色的文字,再按润色键")
+                    return
+                if len(text) > 2000:
+                    self.bridge.error.emit(-1, "选中内容太长(超过2000字)")
+                    return
+                self.bridge.busy.emit("润色中…")
+                fixed = self.cor.polish(text.strip())
+                if fixed == text.strip():
+                    self.bridge.done.emit(-1, "已检查,没有需要修改的地方", self.cor.last_llm_used)
+                    return
+                self.injector.inject(fixed)  # 润色不产生音频,不入数据飞轮
+                self.bridge.done.emit(-1, fixed, self.cor.last_llm_used)
+            except Exception:
+                traceback.print_exc()
+                self.bridge.error.emit(-1, "润色失败,详情见日志")
+            finally:
+                self._polishing = False
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _open_history(self):
         # 全局热键在模态对话框期间照样生效,识别结果会注入进对话框——先摘掉
@@ -914,7 +955,7 @@ def main():
         shown = False
         try:
             qa = QApplication.instance() or QApplication(sys.argv)
-            QMessageBox.critical(None, "语音输入", f"启动失败:{e}\n\n日志在:\n{LOG_PATH}")
+            QMessageBox.critical(None, "听晓", f"启动失败:{e}\n\n日志在:\n{LOG_PATH}")
             shown = True
         except Exception:
             pass
