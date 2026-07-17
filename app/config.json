@@ -85,5 +85,5 @@
     "max_total_mb": 2048
   },
   "record_mode": "hold",
-  "update_url": ""
+  "update_url": "https://api.github.com/repos/quanqiutongshi01-svg/VoiceInput/releases/latest"
 }
