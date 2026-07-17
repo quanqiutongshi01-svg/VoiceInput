@@ -45,6 +45,18 @@ class MacInjector(PrintInjector):
         pb.clearContents()
         pb.setString_forType_(text, NSPasteboardTypeString)
 
+    def _paste_via_quartz(self):
+        """用 Quartz 合成 Cmd+V(比 osascript 更可靠;需辅助功能权限)。"""
+        import Quartz
+
+        src = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
+        V = 9  # 虚拟键码 V
+        for pressed in (True, False):
+            ev = Quartz.CGEventCreateKeyboardEvent(src, V, pressed)
+            Quartz.CGEventSetFlags(ev, Quartz.kCGEventFlagMaskCommand)
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+            time.sleep(0.01)
+
     def inject(self, text: str):
         import subprocess
         import threading
@@ -56,10 +68,14 @@ class MacInjector(PrintInjector):
             print(f"[inject] 写剪贴板失败: {e}")
             return
         time.sleep(0.05)
-        subprocess.run(
-            ["osascript", "-e",
-             'tell application "System Events" to keystroke "v" using {command down}'],
-            check=False)
+        try:
+            self._paste_via_quartz()
+        except Exception as e:
+            print(f"[inject] Quartz 粘贴失败,退回 osascript: {e}")
+            subprocess.run(
+                ["osascript", "-e",
+                 'tell application "System Events" to keystroke "v" using {command down}'],
+                check=False)
 
         def restore():
             time.sleep(0.6)

@@ -213,7 +213,7 @@ from sounds import play  # noqa: E402  柔和提示音(带蜂鸣兜底)
 # 界面层(悬浮条/设置窗口/动画控件/历史)在 ui.py
 from ui import Overlay, SettingsDialog, HistoryDialog  # noqa: E402
 
-VERSION = "3.5.8"
+VERSION = "3.5.9"
 
 
 def brand_pixmap(size):
@@ -383,6 +383,13 @@ class VoiceInputApp:
                 self.bridge.notify.emit(
                     "听晓已就绪", f"按住 {hk} 说话,松开出字。图标可能收在托盘 ^ 里。", 4000)
                 self.bridge.done.emit(-1, f"听晓已启动 · 按住 {hk} 说话", False)
+                if sys.platform == "darwin":
+                    try:
+                        from hotkeys import mac_accessibility_ok
+                        if not mac_accessibility_ok(prompt=True):
+                            self.bridge.perm_needed.emit("ACCESSIBILITY")
+                    except Exception:
+                        traceback.print_exc()
                 self._run_flywheel()
                 self._check_remote_update()
             except Exception as e:
@@ -686,9 +693,16 @@ class VoiceInputApp:
         self._xfer_dialog.activateWindow()
 
     def _on_perm_needed(self, msg):
-        box = QMessageBox(QMessageBox.Warning, "需要授权「输入监控」", msg + "\n\n"
-                          "听晓要监听你选的热键,必须获得这个权限,否则按键没有反应。",
-                          QMessageBox.NoButton)
+        if msg == "ACCESSIBILITY":
+            title = "需要授权「辅助功能」"
+            body = ("听晓要把识别出的文字粘贴进光标位置,必须获得「辅助功能」权限,"
+                    "否则文字进不了输入框。\n\n请在打开的设置里勾选「听晓」,然后重启听晓。")
+            pane = "Privacy_Accessibility"
+        else:
+            title = "需要授权「输入监控」"
+            body = (msg + "\n\n听晓要监听你选的热键,必须获得这个权限,否则按键没有反应。")
+            pane = "Privacy_ListenEvent"
+        box = QMessageBox(QMessageBox.Warning, title, body, QMessageBox.NoButton)
         open_btn = box.addButton("打开系统设置", QMessageBox.AcceptRole)
         box.addButton("知道了", QMessageBox.RejectRole)
         box.exec()
@@ -698,8 +712,7 @@ class VoiceInputApp:
 
                 subprocess.Popen([
                     "open",
-                    "x-apple.systempreferences:com.apple.preference.security"
-                    "?Privacy_ListenEvent"])
+                    f"x-apple.systempreferences:com.apple.preference.security?{pane}"])
             except Exception:
                 traceback.print_exc()
 

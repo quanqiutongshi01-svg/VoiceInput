@@ -71,6 +71,22 @@ def mac_input_monitoring_ok(request=False):
     return True  # 老系统没这套 API,当作已授权,交给 tap 创建自己失败
 
 
+def mac_accessibility_ok(prompt=False):
+    """检查(可选请求)macOS 辅助功能权限——模拟按键(粘贴)必需。"""
+    try:
+        from ApplicationServices import (
+            AXIsProcessTrustedWithOptions, kAXTrustedCheckOptionPrompt)
+
+        return bool(AXIsProcessTrustedWithOptions(
+            {kAXTrustedCheckOptionPrompt: bool(prompt)}))
+    except Exception:
+        try:
+            from ApplicationServices import AXIsProcessTrusted
+            return bool(AXIsProcessTrusted())
+        except Exception:
+            return True  # 拿不到 API 就不拦,交给实际操作自己失败
+
+
 class _MacHotkeys:
     """Quartz CGEventTap 装在主线程 CFRunLoop 上,只读虚拟键码,
     不碰输入源接口(pynput 后台线程调 TIS 会触发 macOS 断言崩溃)。"""
