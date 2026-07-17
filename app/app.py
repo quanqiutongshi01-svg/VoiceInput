@@ -168,7 +168,7 @@ from sounds import play  # noqa: E402  柔和提示音(带蜂鸣兜底)
 # 界面层(悬浮条/设置窗口/动画控件/历史)在 ui.py
 from ui import Overlay, SettingsDialog, HistoryDialog  # noqa: E402
 
-VERSION = "3.5.3"
+VERSION = "3.5.4"
 
 
 # ---------- 信号桥:非 Qt 线程 → Qt 主线程(int 均为会话代数,-1=应用级) ----------
@@ -373,7 +373,10 @@ class VoiceInputApp:
         self._act_rime.setVisible(sys.platform == "win32")
         self._act_rime.triggered.connect(self._install_keyboard_ime)
         self._menu.addAction(self._act_rime)
-        self._act_update = QAction("安装更新包…")
+        self._act_checkupd = QAction("检查更新")
+        self._act_checkupd.triggered.connect(self._check_update_now)
+        self._menu.addAction(self._act_checkupd)
+        self._act_update = QAction("从文件安装更新包…")
         self._act_update.triggered.connect(self._install_update)
         self._menu.addAction(self._act_update)
         self._act_upgrade = QAction("")  # 发现新版本时才可见
@@ -800,6 +803,33 @@ class VoiceInputApp:
                     self._bind_hotkey(self.cfg.get("hotkey", "f9"))
                 except Exception:
                     traceback.print_exc()
+
+    def _check_update_now(self):
+        """手动检查更新:立刻查,有新版走一键更新,没有也明确提示。"""
+        url = self.cfg.get("update_url", "")
+        if not url:
+            QMessageBox.information(None, "检查更新", "未配置更新地址。")
+            return
+        self.bridge.status.emit("正在检查更新…")
+        self.bridge.notify.emit("检查更新", "正在联网查询最新版本…", 2500)
+
+        def work():
+            try:
+                import updater
+
+                has_new, info = updater.check_remote(url, VERSION)
+                if has_new:
+                    self.bridge.update_found.emit(info)
+                else:
+                    self.bridge.notify.emit(
+                        "已是最新版", f"当前 v{VERSION},没有更新。", 4000)
+                    self.bridge.status.emit(
+                        f"就绪 — 按住 {self.cfg.get('hotkey','f9').upper()} 说话")
+            except Exception as e:
+                traceback.print_exc()
+                self.bridge.notify.emit("检查更新失败", f"联网查询出错:{e}", 5000)
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _check_remote_update(self):
         """启动后静默检查一次(update_url 为空则完全不联网)。"""
