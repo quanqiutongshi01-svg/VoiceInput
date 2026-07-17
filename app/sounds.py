@@ -5,8 +5,18 @@ import subprocess
 import sys
 import threading
 
-BASE = os.path.dirname(os.path.abspath(__file__))
-_FILES = {k: os.path.join(BASE, "sounds", f"{k}.wav") for k in ("start", "stop", "error")}
+def _sounds_dir():
+    # 冻结成 .app 时用 cwd(app 已 chdir 到数据目录并播种了 sounds);否则用本文件旁
+    for d in (os.path.join(os.getcwd(), "sounds"),
+              os.path.join(getattr(sys, "_MEIPASS", ""), "sounds"),
+              os.path.join(os.path.dirname(os.path.abspath(__file__)), "sounds")):
+        if d and os.path.isdir(d):
+            return d
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "sounds")
+
+
+BASE = _sounds_dir()
+_FILES = {k: os.path.join(BASE, f"{k}.wav") for k in ("start", "stop", "error")}
 _FALLBACK_FREQ = {"start": 880, "stop": 440, "error": 220}
 
 

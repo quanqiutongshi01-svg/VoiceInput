@@ -53,6 +53,10 @@ class Overlay(QWidget):
         super().__init__(None, Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setAttribute(Qt.WA_TranslucentBackground)
+        # macOS:Tool 窗口默认只在本 App 最前台时显示;听晓常在后台,
+        # 必须加这个属性,悬浮条才能盖在别的应用上出现。
+        if hasattr(Qt, "WA_MacAlwaysShowToolWindow"):
+            self.setAttribute(Qt.WA_MacAlwaysShowToolWindow, True)
         self.setWindowFlag(Qt.WindowDoesNotAcceptFocus, True)
         self.setFocusPolicy(Qt.NoFocus)
         self.setFont(ui_font(14))

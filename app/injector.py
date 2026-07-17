@@ -24,25 +24,50 @@ class PrintInjector:
 
 
 class MacInjector(PrintInjector):
-    """剪贴板 + Cmd+V:对中文/长文本最可靠;0.6s 后恢复原剪贴板文本。
-    需要在 系统设置→隐私与安全性→辅助功能 里授权运行它的终端/应用。"""
+    """原生 NSPasteboard 写剪贴板 + Cmd+V 粘贴。用 AppKit 不依赖 locale,
+    彻底避免独立 App 无 UTF-8 环境时 pbcopy 把中文写成乱码。
+    需要 辅助功能 权限(粘贴按键)。0.6s 后恢复原剪贴板文本。"""
+
+    def _pb(self):
+        from AppKit import NSPasteboard
+        return NSPasteboard.generalPasteboard()
+
+    def _get_text(self):
+        try:
+            from AppKit import NSPasteboardTypeString
+            return self._pb().stringForType_(NSPasteboardTypeString)
+        except Exception:
+            return None
+
+    def _set_text(self, text):
+        from AppKit import NSPasteboardTypeString
+        pb = self._pb()
+        pb.clearContents()
+        pb.setString_forType_(text, NSPasteboardTypeString)
 
     def inject(self, text: str):
         import subprocess
         import threading
 
-        old = subprocess.run(["pbpaste"], capture_output=True).stdout
-        subprocess.run(["pbcopy"], input=text.encode("utf-8"))
-        time.sleep(0.08)
+        try:
+            old = self._get_text()
+            self._set_text(text)
+        except Exception as e:
+            print(f"[inject] 写剪贴板失败: {e}")
+            return
+        time.sleep(0.05)
         subprocess.run(
             ["osascript", "-e",
              'tell application "System Events" to keystroke "v" using {command down}'],
-            check=False,
-        )
+            check=False)
 
         def restore():
             time.sleep(0.6)
-            subprocess.run(["pbcopy"], input=old)
+            if old is not None:
+                try:
+                    self._set_text(old)
+                except Exception:
+                    pass
 
         threading.Thread(target=restore, daemon=True).start()
 

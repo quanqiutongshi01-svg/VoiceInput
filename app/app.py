@@ -19,7 +19,21 @@ import threading
 import time
 import traceback
 
-BASE = os.path.dirname(os.path.abspath(__file__))
+FROZEN = getattr(sys, "frozen", False)
+if FROZEN:
+    # 独立 .app:数据/配置/日志放用户可写目录;首次从打包资源里播种
+    BASE = os.path.expanduser("~/Library/Application Support/听晓")
+    os.makedirs(BASE, exist_ok=True)
+    import shutil as _sh
+
+    _RES = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    for item in ("config.json", "sounds"):
+        src = os.path.join(_RES, item)
+        dst = os.path.join(BASE, item)
+        if os.path.exists(src) and not os.path.exists(dst):
+            (_sh.copytree if os.path.isdir(src) else _sh.copy)(src, dst)
+else:
+    BASE = os.path.dirname(os.path.abspath(__file__))
 os.chdir(BASE)
 sys.path.insert(0, BASE)
 
@@ -199,7 +213,7 @@ from sounds import play  # noqa: E402  柔和提示音(带蜂鸣兜底)
 # 界面层(悬浮条/设置窗口/动画控件/历史)在 ui.py
 from ui import Overlay, SettingsDialog, HistoryDialog  # noqa: E402
 
-VERSION = "3.5.7"
+VERSION = "3.5.8"
 
 
 def brand_pixmap(size):
@@ -338,7 +352,11 @@ class VoiceInputApp:
                     self.draft = None
                     print(f"[app] 流式模型缺失,退化为松键后出字: {e}")
                 self.cor = Corrector(self.cfg.get("llm"), self.cfg.get("hotwords"), self.cfg.get("glossary"))
-                self.arc = Archiver(self.cfg.get("archive"))
+                _arch = dict(self.cfg.get("archive") or {})
+                _ad = _arch.get("dir", "data")
+                if not os.path.isabs(os.path.expanduser(_ad)):
+                    _arch["dir"] = os.path.join(BASE, _ad)
+                self.arc = Archiver(_arch)
                 self.injector = make_injector(
                     self.cfg.get("inject_method", "sendinput"),
                     self.cfg.get("inject_fallback_clipboard", True),
@@ -1122,7 +1140,11 @@ class VoiceInputApp:
                 print(f"  原始: {raw}")
                 if fixed != raw:
                     print(f"  纠错: {fixed}")
-                self.injector.inject(fixed)
+                try:
+                    self.injector.inject(fixed)
+                except Exception:
+                    traceback.print_exc()
+                    print("[app] 注入失败(不影响存档)")
                 self.arc.save(samples16, raw, fixed)
                 self.bridge.done.emit(gen, fixed, self.cor.last_llm_used)
                 if self.cor.circuit_just_opened:
