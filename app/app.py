@@ -168,7 +168,7 @@ from sounds import play  # noqa: E402  柔和提示音(带蜂鸣兜底)
 # 界面层(悬浮条/设置窗口/动画控件/历史)在 ui.py
 from ui import Overlay, SettingsDialog, HistoryDialog  # noqa: E402
 
-VERSION = "3.4.1"
+VERSION = "3.5.0"
 
 
 # ---------- 信号桥:非 Qt 线程 → Qt 主线程(int 均为会话代数,-1=应用级) ----------
@@ -184,6 +184,8 @@ class Bridge(QObject):
     update_found = Signal(dict)     # 远程发现新版本
     polish = Signal()               # 润色热键
     busy = Signal(str)              # 悬浮条忙碌提示
+    xfer_in = Signal(str, str, str) # 收到快传(kind, from, payload)
+    xfer_peers = Signal(list)       # 在线设备表变化
 
 
 # ---------- 主控 ----------
@@ -217,6 +219,8 @@ class VoiceInputApp:
         self.bridge.update_found.connect(self._on_update_found, Qt.QueuedConnection)
         self.bridge.polish.connect(self._do_polish, Qt.QueuedConnection)
         self.bridge.busy.connect(self.overlay.show_busy, Qt.QueuedConnection)
+        self.bridge.xfer_in.connect(self._on_xfer_in, Qt.QueuedConnection)
+        self.bridge.xfer_peers.connect(self._on_xfer_peers, Qt.QueuedConnection)
 
         self.ready = False
         self.recording = False
@@ -228,6 +232,8 @@ class VoiceInputApp:
         self._watch.timeout.connect(self._watch_tick)
         self._pending_update = None  # 远程发现的新版本 info
         self._polishing = False      # 润色单飞标志
+        self._xfer = None            # TransferService
+        self._xfer_dialog = None
         self._update_timer = QTimer()  # 每24小时静默再查一次
         self._update_timer.setInterval(24 * 3600 * 1000)
         self._update_timer.timeout.connect(
@@ -285,12 +291,14 @@ class VoiceInputApp:
                     self._workers_started = True
                     threading.Thread(target=self._final_worker, daemon=True).start()
                     threading.Thread(target=self._draft_worker, daemon=True).start()
+                    self._start_transfer()
                 self.ready = True
                 hk = self.cfg.get("hotkey", "f9").upper()
                 self.bridge.status.emit(f"就绪 — 按住 {hk} 说话")
                 print("[app] 就绪")
                 self.bridge.notify.emit(
                     "听晓已就绪", f"按住 {hk} 说话,松开出字。图标可能收在托盘 ^ 里。", 4000)
+                self.bridge.done.emit(-1, f"听晓已启动 · 按住 {hk} 说话", False)
                 self._run_flywheel()
                 self._check_remote_update()
             except Exception as e:
@@ -351,6 +359,10 @@ class VoiceInputApp:
         self._act_log = QAction("打开日志")
         self._act_log.triggered.connect(self._open_log)
         self._menu.addAction(self._act_log)
+        self._act_xfer = QAction("家庭快传…")
+        self._act_xfer.triggered.connect(self._open_transfer)
+        self._menu.addAction(self._act_xfer)
+        self._menu.addSeparator()
         self._act_history = QAction("最近听写…")
         self._act_history.triggered.connect(self._open_history)
         self._menu.addAction(self._act_history)
@@ -563,6 +575,63 @@ class VoiceInputApp:
                 traceback.print_exc()
         # 复用本地安装流程(确认框/备份/配置合并/重启提示都在里面)
         self._install_update(zip_path=tmp)
+
+    def _start_transfer(self):
+        try:
+            from transfer import TransferService
+
+            tc = self.cfg.setdefault("transfer", {})
+            if not tc.get("device_id"):
+                import uuid
+
+                tc["device_id"] = uuid.uuid4().hex[:12]
+                self._save_config()
+            self._xfer = TransferService(
+                tc,
+                on_incoming=lambda k, f, p: self.bridge.xfer_in.emit(k, f, p),
+                on_peers=lambda ps: self.bridge.xfer_peers.emit(ps))
+            self._xfer.start()
+            if self._xfer.error:
+                self.bridge.notify.emit("快传启动异常", self._xfer.error, 6000)
+        except Exception:
+            traceback.print_exc()
+
+    def _open_transfer(self):
+        if not self._xfer:
+            self.overlay.show_error("快传服务未就绪")
+            return
+        from transfer_ui import QuickTransferDialog
+
+        if self._xfer_dialog is None:
+            self._xfer_dialog = QuickTransferDialog(self._xfer)
+        self._xfer_dialog.refresh_peers(self._xfer.peers())
+        self._xfer_dialog.show()
+        self._xfer_dialog.raise_()
+        self._xfer_dialog.activateWindow()
+
+    def _on_xfer_peers(self, peers):
+        if self._xfer_dialog and self._xfer_dialog.isVisible():
+            self._xfer_dialog.refresh_peers(peers)
+
+    def _on_xfer_in(self, kind, frm, payload):
+        if kind == "text":
+            try:
+                from PySide6.QtWidgets import QApplication as _QA
+
+                _QA.clipboard().setText(payload)
+            except Exception:
+                pass
+            preview = (payload[:50] + "…") if len(payload) > 50 else payload
+            self.bridge.notify.emit(
+                f"{frm} 发来文字", preview + "  (已复制到剪贴板)", 6000)
+            self.overlay.show_done(f"{frm}发来文字,已复制", False)
+        else:
+            import os as _os
+
+            name = _os.path.basename(payload)
+            self.bridge.notify.emit(
+                f"{frm} 发来文件", f"{name}\n已存到快传文件夹", 6000)
+            self.overlay.show_done(f"收到文件:{name}", False)
 
     def _do_polish(self):
         """润色热键:取选中文字→热词+LLM修正→原地替换(覆盖选区)。"""

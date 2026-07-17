@@ -86,5 +86,10 @@
   },
   "record_mode": "hold",
   "update_url": "https://api.github.com/repos/quanqiutongshi01-svg/VoiceInput/releases/latest",
-  "polish_hotkey": "off"
+  "polish_hotkey": "off",
+  "transfer": {
+    "device_name": "",
+    "family_code": "fam-VpNWWoUqIdztBJqeBxoe5uw3",
+    "save_dir": "~/Downloads"
+  }
 }
