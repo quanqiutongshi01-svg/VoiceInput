@@ -1,0 +1,7 @@
+sherpa-onnx==1.13.4
+sounddevice>=0.4.6,<0.6
+soundfile>=0.12,<0.14
+numpy>=1.24,<3
+keyboard==0.13.5; sys_platform == "win32"
+PySide6-Essentials==6.10.3
+shiboken6==6.10.3

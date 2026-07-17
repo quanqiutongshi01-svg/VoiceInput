@@ -1,0 +1,89 @@
+{
+  "hotkey": "f9",
+  "mic_name_contains": "",
+  "beep": true,
+  "persistent_mic": true,
+  "min_speech_seconds": 0.4,
+  "max_speech_seconds": 60,
+  "models_dir": "models",
+  "punctuation": true,
+  "language": "auto",
+  "glossary": [
+    "Claude",
+    "Claude Code",
+    "Codex",
+    "ChatGPT",
+    "GitHub",
+    "Python",
+    "API",
+    "Cursor",
+    "App",
+    "iPhone",
+    "Windows",
+    "Mac",
+    "AI"
+  ],
+  "inject_method": "sendinput",
+  "inject_fallback_clipboard": true,
+  "llm": {
+    "enabled": false,
+    "base_url": "https://api.deepseek.com/v1",
+    "api_key": "",
+    "model": "deepseek-chat",
+    "timeout_seconds": 3,
+    "min_chars_for_llm": 10
+  },
+  "hotwords": {
+    "黄冈": [
+      "黄岗",
+      "皇岗"
+    ],
+    "Claude Code": [
+      "cloud code",
+      "cloth code",
+      "clod code",
+      "克劳德code"
+    ],
+    "Claude": [
+      "cloth",
+      "clod",
+      "clo",
+      "克劳德",
+      "克劳的"
+    ],
+    "Codex": [
+      "codeex",
+      "codex",
+      "口德克斯",
+      "扣德克斯"
+    ],
+    "ChatGPT": [
+      "cht GPT",
+      "chat GPT",
+      "查GPT",
+      "insgpt"
+    ],
+    "GitHub": [
+      "gittopub",
+      "git hub",
+      "吉特哈布"
+    ],
+    "Python": [
+      "kison",
+      "拍森",
+      "派森"
+    ],
+    "API": [
+      "APII",
+      "A屁I"
+    ]
+  },
+  "archive": {
+    "enabled": true,
+    "save_audio": true,
+    "dir": "data",
+    "max_total_mb": 2048
+  },
+  "record_mode": "hold",
+  "update_url": ""
+}
