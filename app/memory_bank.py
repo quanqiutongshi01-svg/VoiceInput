@@ -240,6 +240,91 @@ class MemoryBank:
                 best, best_s = sp, s
         return (best, round(best_s, 3))
 
+    # -- 备份(NAS/移动盘)--
+
+    def disk_usage_mb(self):
+        """整个记忆库目录的磁盘占用(MB)。"""
+        total = 0
+        for dirpath, _dirs, files in os.walk(self.root):
+            for fn in files:
+                try:
+                    total += os.path.getsize(os.path.join(dirpath, fn))
+                except OSError:
+                    pass
+        return total / 1048576.0
+
+    def backup_state(self):
+        p = os.path.join(self.root, "backup_state.json")
+        if os.path.exists(p):
+            try:
+                with open(p, encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {}
+
+    def backup(self, dest_root, free_audio=False):
+        """增量备份整个记忆库到 dest_root/听晓声音记忆库备份/。
+        只复制目标缺失或大小不同的文件(jsonl 追加后会重拷,保持最新)。
+        free_audio=True 时,复制并逐一校验(存在+大小一致)后删除本地 wav,
+        释放硬盘;文字清单(utterances.jsonl)与声纹(voiceprint.json)永远保留在本地。
+        返回 dict(ok, copied, freed_mb, total_mb, dest, err)。"""
+        import shutil
+        dest = os.path.join(os.path.expanduser(dest_root), "听晓声音记忆库备份")
+        copied = 0
+        freed = 0.0
+        total = 0.0
+        try:
+            os.makedirs(dest, exist_ok=True)
+            probe = os.path.join(dest, ".write_test")
+            with open(probe, "w") as f:
+                f.write("ok")
+            os.remove(probe)
+        except Exception as e:
+            return {"ok": False, "err": f"备份目标不可写:{e}", "dest": dest,
+                    "copied": 0, "freed_mb": 0.0, "total_mb": 0.0}
+        try:
+            for dirpath, _dirs, files in os.walk(self.root):
+                for fn in files:
+                    if fn == "backup_state.json":
+                        continue
+                    src = os.path.join(dirpath, fn)
+                    rel = os.path.relpath(src, self.root)
+                    dst = os.path.join(dest, rel)
+                    try:
+                        ssize = os.path.getsize(src)
+                    except OSError:
+                        continue
+                    total += ssize
+                    need = (not os.path.exists(dst)
+                            or os.path.getsize(dst) != ssize)
+                    if need:
+                        os.makedirs(os.path.dirname(dst), exist_ok=True)
+                        shutil.copy2(src, dst)
+                        copied += 1
+                    # 释放:仅音频,且必须校验目标副本完好
+                    if (free_audio and fn.lower().endswith(".wav")
+                            and os.path.exists(dst)
+                            and os.path.getsize(dst) == ssize):
+                        try:
+                            os.remove(src)
+                            freed += ssize
+                        except OSError:
+                            pass
+            state = {"ts": time.strftime("%Y-%m-%d %H:%M:%S"), "dest": dest,
+                     "copied": copied, "freed_mb": round(freed / 1048576.0, 1)}
+            with open(os.path.join(self.root, "backup_state.json"), "w",
+                      encoding="utf-8") as f:
+                json.dump(state, f, ensure_ascii=False)
+            return {"ok": True, "copied": copied,
+                    "freed_mb": round(freed / 1048576.0, 1),
+                    "total_mb": round(total / 1048576.0, 1),
+                    "dest": dest, "err": ""}
+        except Exception as e:
+            return {"ok": False, "err": str(e), "dest": dest, "copied": copied,
+                    "freed_mb": round(freed / 1048576.0, 1),
+                    "total_mb": round(total / 1048576.0, 1)}
+
     # -- 导出「声音记忆包」--
     def export(self, speaker, out_dir):
         """把某人的音频+文字清单+声纹打包到 out_dir,直接可喂给未来的声音克隆/风格模型。

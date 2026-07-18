@@ -93,7 +93,15 @@
     "pet_enabled": true,
     "pet_skin": "奶黄"
   },
+  "pet_brain": {
+    "enabled": true,
+    "persona": "俏皮",
+    "proactive": true
+  },
   "record_mode": "hold",
+  "update_auto_restart": true,
+  "draft_enabled": true,
+  "draft_engine": "paraformer",
   "update_url": "https://api.github.com/repos/quanqiutongshi01-svg/VoiceInput/releases/latest",
   "polish_hotkey": "off",
   "transfer": {

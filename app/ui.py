@@ -593,6 +593,12 @@ class SettingsDialog(QDialog):
         self.beep = Switch(bool(cfg.get("beep", True)))
         self.persistent = Switch(bool(cfg.get("persistent_mic", True)))
         self.autostart = Switch(get_autostart(exe_path))
+        self.auto_restart = Switch(bool(cfg.get("update_auto_restart", True)))
+        self.draft_mode = QComboBox()
+        self.draft_mode.addItem("开启(说话时双语实时预览)", "paraformer")
+        self.draft_mode.addItem("关闭(省约380MB内存,松键后出字)", "off")
+        _dm = "paraformer" if cfg.get("draft_enabled", True) else "off"
+        self.draft_mode.setCurrentIndex(max(0, self.draft_mode.findData(_dm)))
 
         llm = cfg.get("llm") or {}
         self.llm_on = Switch(bool(llm.get("enabled")))
@@ -634,12 +640,14 @@ class SettingsDialog(QDialog):
             _row("录音方式", self.record_mode, "长段听写建议用「单击开始」,不用一直按着"),
             _row("提示音", self.beep),
             _row("开机自动启动", self.autostart),
+            _row("更新后自动重启", self.auto_restart, "装完更新自动帮你重开听晓,不用去文件夹里找"),
             _row("悬浮条", btn_reset, "拖动可移动位置;点按钮恢复到屏幕下方中央"),
         ))
         v.addWidget(_header("麦克风"))
         v.addWidget(_card(
             _row("输入设备", self.mic),
             _row("常驻占用", self.persistent, "按键即录不丢字;蓝牙耳机会保持通话音质"),
+            _row("实时草稿", self.draft_mode, "说话时的逐字预览;最终出字都由主引擎完成,不受此影响(重启生效)"),
         ))
         v.addWidget(_header("智能纠错(可选)"))
         v.addWidget(_card(
@@ -702,6 +710,10 @@ class SettingsDialog(QDialog):
         cfg["mic_name_contains"] = self.mic.currentData() or ""
         cfg["beep"] = self.beep.isChecked()
         cfg["persistent_mic"] = self.persistent.isChecked()
+        cfg["update_auto_restart"] = self.auto_restart.isChecked()
+        _dm = self.draft_mode.currentData() or "paraformer"
+        cfg["draft_enabled"] = _dm != "off"
+        cfg["draft_engine"] = "paraformer"
         llm = cfg.get("llm") or {}
         llm["enabled"] = self.llm_on.isChecked()
         llm["base_url"] = self.llm_url.text().strip() or "https://api.deepseek.com/v1"

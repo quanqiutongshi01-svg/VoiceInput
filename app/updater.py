@@ -16,7 +16,10 @@ import shutil
 import time
 import zipfile
 
-ALLOWED_EXT = {".py", ".wav", ".txt", ".md", ".json"}
+ALLOWED_EXT = {".py", ".wav", ".txt", ".md", ".json", ".ico"}
+# 精确文件名白名单:新启动器以 .new 落盘,由重启脚本在旧进程退出后替换
+# (更新包本就承载可执行的 .py,放行这一个指定名字的 exe 不扩大信任面)
+ALLOWED_NAMES = {"VoiceInput.exe.new"}
 BACKUP_ROOT = "backup_更新前"
 KEEP_BACKUPS = 3
 
@@ -95,7 +98,8 @@ def install_from_zip(zip_path: str, app_dir: str):
                 rel = name[4:] if name.startswith("app/") else name
                 if not rel or rel.startswith((".", "/")) or ".." in rel:
                     continue
-                if os.path.splitext(rel)[1].lower() not in ALLOWED_EXT:
+                if (os.path.splitext(rel)[1].lower() not in ALLOWED_EXT
+                        and os.path.basename(rel) not in ALLOWED_NAMES):
                     continue
                 base = os.path.basename(rel)
                 if base == "使用说明.txt":

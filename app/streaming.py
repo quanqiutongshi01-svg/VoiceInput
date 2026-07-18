@@ -16,10 +16,27 @@ ZIPFORMER_DIR = "sherpa-onnx-streaming-zipformer-zh-14M-2023-02-23"
 class StreamingDraft:
     """一次听写 = 一个 session(create_stream);feed 返回当前累计草稿文本。"""
 
-    def __init__(self, models_dir, num_threads=2):
+    def __init__(self, models_dir, num_threads=2, prefer="paraformer"):
+        """prefer: 'zipformer'=轻量草稿(约118MB,纯中文预览) / 'paraformer'=标准(约380MB,中英)。
+        首选缺失时自动退到另一个;终稿始终由 SenseVoice 出,草稿引擎不影响最终文字。"""
         pd = os.path.join(models_dir, PARAFORMER_DIR)
         zd = os.path.join(models_dir, ZIPFORMER_DIR)
-        if os.path.isfile(os.path.join(pd, "encoder.int8.onnx")):
+        has_p = os.path.isfile(os.path.join(pd, "encoder.int8.onnx"))
+        has_z = os.path.isfile(os.path.join(zd, "encoder-epoch-99-avg-1.int8.onnx"))
+        use_z = (prefer == "zipformer" and has_z) or (not has_p and has_z)
+        if use_z:
+            self._rec = sherpa_onnx.OnlineRecognizer.from_transducer(
+                tokens=os.path.join(zd, "tokens.txt"),
+                encoder=os.path.join(zd, "encoder-epoch-99-avg-1.int8.onnx"),
+                decoder=os.path.join(zd, "decoder-epoch-99-avg-1.onnx"),
+                joiner=os.path.join(zd, "joiner-epoch-99-avg-1.int8.onnx"),
+                num_threads=num_threads,
+                sample_rate=16000,
+                feature_dim=80,
+            )
+            self.kind = "zipformer(轻量)"
+            return
+        if has_p:
             self._rec = sherpa_onnx.OnlineRecognizer.from_paraformer(
                 tokens=os.path.join(pd, "tokens.txt"),
                 encoder=os.path.join(pd, "encoder.int8.onnx"),

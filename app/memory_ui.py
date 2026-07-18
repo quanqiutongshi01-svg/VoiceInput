@@ -1,9 +1,10 @@
-"""声音记忆库设置/查看对话框:开关、主人名、按人统计、导出记忆包、打开文件夹。"""
+"""声音记忆库设置/查看对话框:开关、主人名、按人统计、导出记忆包、备份到NAS、打开文件夹。"""
 import os
 import subprocess
 import sys
+import threading
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
     QMessageBox, QPushButton, QVBoxLayout, QWidget,
@@ -24,6 +25,8 @@ def _open_folder(path):
 
 class MemoryBankDialog(QDialog):
     """需要宿主 app 提供:cfg / mem(MemoryBank 或 None)/ _save_config() / _reload_memory_bank()。"""
+
+    backup_done = Signal(dict)   # 后台备份完成 → 主线程刷新
 
     def __init__(self, app):
         super().__init__()
@@ -67,6 +70,25 @@ class MemoryBankDialog(QDialog):
             "background:#f5f5f7;border-radius:8px;padding:10px;color:#333;")
         lay.addWidget(self.stats_box)
 
+        # 库信息:位置 / 占用 / 上次备份(位置可选中复制)
+        self.info_box = QLabel()
+        self.info_box.setWordWrap(True)
+        self.info_box.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.info_box.setStyleSheet(
+            "background:#eef3fb;border-radius:8px;padding:10px;color:#334;font-size:12px;")
+        lay.addWidget(self.info_box)
+
+        # 备份区:目标选择 + 可选释放本地音频
+        self.chk_free = QCheckBox("备份校验通过后,删除本地已备份的录音(释放硬盘;文字和声纹永远保留)")
+        self.chk_free.setChecked(False)
+        lay.addWidget(self.chk_free)
+        bkrow = QHBoxLayout()
+        self.btn_backup = QPushButton("备份到 NAS / 文件夹…")
+        self.btn_backup.clicked.connect(self._backup)
+        bkrow.addWidget(self.btn_backup)
+        bkrow.addStretch(1)
+        lay.addLayout(bkrow)
+
         # 导出人选择
         exprow = QHBoxLayout()
         exprow.addWidget(QLabel("导出谁的记忆包:"))
@@ -95,6 +117,7 @@ class MemoryBankDialog(QDialog):
         note.setStyleSheet("color:#999;font-size:11px;")
         lay.addWidget(note)
 
+        self.backup_done.connect(self._on_backup_done)
         self._refresh()
 
     def _mem(self):
@@ -105,8 +128,23 @@ class MemoryBankDialog(QDialog):
         self.who.clear()
         if mem is None:
             self.stats_box.setText("记忆库尚未就绪(引擎还在加载或初始化失败)。")
+            self.info_box.setText("")
             self.btn_export.setEnabled(False)
+            self.btn_backup.setEnabled(False)
             return
+        # 库信息:位置 / 磁盘占用 / 上次备份
+        try:
+            usage = mem.disk_usage_mb()
+            st = mem.backup_state()
+            last = (f"上次备份:{st.get('ts')} → {st.get('dest')}"
+                    + (f"(释放了 {st['freed_mb']}MB)" if st.get("freed_mb") else "")
+                    if st.get("ts") else "还没备份过。建议定期备份到 NAS,再勾选上面选项释放本地空间。")
+            self.info_box.setText(
+                f"📁 位置:{mem.root}\n"
+                f"💾 本地占用:{usage:.0f} MB\n"
+                f"🗄 {last}")
+        except Exception:
+            self.info_box.setText(f"📁 位置:{mem.root}")
         speakers = mem.list_speakers()
         if not speakers:
             self.stats_box.setText(
@@ -185,3 +223,50 @@ class MemoryBankDialog(QDialog):
             _open_folder(pack)
         else:
             QMessageBox.warning(self, "导出失败", msg)
+
+    # ---- 备份到 NAS / 文件夹 ----
+
+    def _backup(self):
+        mem = self._mem()
+        if mem is None:
+            return
+        dest = QFileDialog.getExistingDirectory(
+            self, "选择备份目标(NAS 挂载盘或任意文件夹)", os.path.expanduser("~"))
+        if not dest:
+            return
+        free = self.chk_free.isChecked()
+        if free:
+            ret = QMessageBox.question(
+                self, "释放本地空间",
+                "备份校验通过后,将删除本地已备份的录音文件(.wav)。\n\n"
+                "删除后,NAS 上的备份就是这些录音的唯一副本——\n"
+                "请确认备份目标可靠(建议 NAS 自身也有冗余)。\n\n"
+                "本地保留:文字清单、声纹、统计(不影响日常使用与继续积累)。\n\n确定继续吗?",
+                QMessageBox.Yes | QMessageBox.No)
+            if ret != QMessageBox.Yes:
+                return
+        self.btn_backup.setEnabled(False)
+        self.btn_backup.setText("备份中…(大库首次备份会久一些)")
+
+        def work():
+            try:
+                r = mem.backup(dest, free_audio=free)
+            except Exception as e:
+                r = {"ok": False, "err": str(e), "dest": dest,
+                     "copied": 0, "freed_mb": 0.0, "total_mb": 0.0}
+            self.backup_done.emit(r)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_backup_done(self, r):
+        self.btn_backup.setEnabled(True)
+        self.btn_backup.setText("备份到 NAS / 文件夹…")
+        if r.get("ok"):
+            msg = (f"已同步 {r['copied']} 个新文件到:\n{r['dest']}\n\n"
+                   f"库总量约 {r['total_mb']:.0f} MB")
+            if r.get("freed_mb"):
+                msg += f"\n本地已释放 {r['freed_mb']} MB(录音已安全转移)"
+            QMessageBox.information(self, "备份完成", msg)
+        else:
+            QMessageBox.warning(self, "备份失败", r.get("err") or "未知错误")
+        self._refresh()

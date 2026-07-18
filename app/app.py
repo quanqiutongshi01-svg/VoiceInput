@@ -214,7 +214,7 @@ from sounds import play  # noqa: E402  柔和提示音(带蜂鸣兜底)
 # 界面层(悬浮条/设置窗口/动画控件/历史)在 ui.py
 from ui import Overlay, SettingsDialog, HistoryDialog  # noqa: E402
 
-VERSION = "3.7.1"
+VERSION = "3.7.2"
 
 
 def brand_pixmap(size):
@@ -263,6 +263,7 @@ class Bridge(QObject):
     xfer_peers = Signal(list)       # 在线设备表变化
     xfer_offer = Signal(str, str, str, int)  # 对方请求发送(offer_id, from, name, size)
     xfer_recv = Signal(dict)        # 接收实时进度/速度(phase:start/progress/done)
+    pet_say = Signal(str)           # 桌宠灵魂(DeepSeek)生成的一句话→主线程说出来
     perm_needed = Signal(str)       # 缺 macOS 输入监控权限
 
 
@@ -302,6 +303,7 @@ class VoiceInputApp:
         self.bridge.xfer_peers.connect(self._on_xfer_peers, Qt.QueuedConnection)
         self.bridge.xfer_offer.connect(self._on_xfer_offer, Qt.QueuedConnection)
         self.bridge.xfer_recv.connect(self._on_xfer_recv, Qt.QueuedConnection)
+        self.bridge.pet_say.connect(self._on_pet_say, Qt.QueuedConnection)
         self.bridge.perm_needed.connect(self._on_perm_needed, Qt.QueuedConnection)
 
         self.ready = False
@@ -320,8 +322,13 @@ class VoiceInputApp:
         self._recv_overlay_last = 0.0  # 悬浮条接收进度节流
         self._dictating = False      # 松键后识别/出字期间占用悬浮条,别让接收进度抢
         self._dict_done_t = 0.0      # 上次听写结果上屏的时刻(结果展示窗内也让位)
+        self.main_win = None         # 主界面(懒创建,关闭=隐藏回托盘)
         self.pet = None              # 桌宠 PetWidget
+        self.pet_brain = None        # 桌宠灵魂(DeepSeek 生成有性格的回应)
         self._pet_mem = []           # 桌宠记得的话
+        self._brain_busy = False     # 灵魂请求在途(防并发)
+        self._brain_last = 0.0       # 上次灵魂开口时刻(节流)
+        self._last_activity_t = 0.0  # 最近一次听写/互动时刻(主动性门控)
         self._pet_idle_timer = None
         self._update_timer = QTimer()  # 每24小时静默再查一次
         self._update_timer.setInterval(24 * 3600 * 1000)
@@ -336,6 +343,10 @@ class VoiceInputApp:
         self._jobs = queue.Queue()
 
         self._ensure_pet()
+        self._pet_idle_timer = QTimer()   # 桌宠主动性:定期看要不要自己冒一句
+        self._pet_idle_timer.setInterval(55 * 1000)
+        self._pet_idle_timer.timeout.connect(self._pet_idle_tick)
+        self._pet_idle_timer.start()
         QTimer.singleShot(50, self._load_engines)
 
     # -- 初始化(可重入:启动失败后从设置窗口重试) --
@@ -358,13 +369,27 @@ class VoiceInputApp:
                 self.rec = Recognizer(self.cfg.get("models_dir", "models"),
                                       punctuation=self.cfg.get("punctuation", True),
                                       language=self.cfg.get("language", "auto"))
-                try:
-                    self.draft = StreamingDraft(self.cfg.get("models_dir", "models"))
-                    print(f"[app] 流式草稿引擎: {self.draft.kind}")
-                except Exception as e:
+                if not self.cfg.get("draft_enabled", True):
                     self.draft = None
-                    print(f"[app] 流式模型缺失,退化为松键后出字: {e}")
+                    print("[app] 实时草稿已关闭(省内存模式),松键后出字")
+                else:
+                    try:
+                        self.draft = StreamingDraft(
+                            self.cfg.get("models_dir", "models"),
+                            prefer=self.cfg.get("draft_engine", "paraformer"))
+                        print(f"[app] 流式草稿引擎: {self.draft.kind}")
+                    except Exception as e:
+                        self.draft = None
+                        print(f"[app] 流式模型缺失,退化为松键后出字: {e}")
                 self.cor = Corrector(self.cfg.get("llm"), self.cfg.get("hotwords"), self.cfg.get("glossary"))
+                # 桌宠的「灵魂」:用 DeepSeek 生成有性格的回应(和纠错同一个 Key,可独立开关)
+                try:
+                    from pet_brain import PetBrain
+                    self.pet_brain = PetBrain(self.cfg.get("llm"), self.cfg.get("pet_brain"))
+                    print(f"[app] 桌宠灵魂: {'DeepSeek 已接入' if self.pet_brain.enabled else '手写台词(未配Key或已关)'}")
+                except Exception as e:
+                    self.pet_brain = None
+                    print(f"[app] 桌宠灵魂初始化失败(不影响桌宠): {e}")
                 _arch = dict(self.cfg.get("archive") or {})
                 _ad = _arch.get("dir", "data")
                 if not os.path.isabs(os.path.expanduser(_ad)):
@@ -417,6 +442,19 @@ class VoiceInputApp:
                         traceback.print_exc()
                 self._run_flywheel()
                 self._check_remote_update()
+                # Windows:首次就绪时自动放一个开始菜单快捷方式(免安装的"标准应用"体验;幂等)
+                if sys.platform == "win32" and not self.cfg.get("start_menu_shortcut_done"):
+                    try:
+                        from main_window import create_shortcut_win
+                        _exe = os.path.abspath(os.path.join(BASE, "..", "VoiceInput.exe"))
+                        if os.path.isfile(_exe):
+                            ok_sc, _p = create_shortcut_win(
+                                "startmenu", _exe, os.path.join(BASE, "听晓.ico"))
+                            if ok_sc:
+                                self.cfg["start_menu_shortcut_done"] = True  # 落盘交给下次保存,失败下次重建(幂等)
+                                print(f"[app] 已添加开始菜单快捷方式: {_p}")
+                    except Exception:
+                        traceback.print_exc()
             except Exception as e:
                 traceback.print_exc()
                 self.bridge.error.emit(-1, f"启动失败: {e}")
@@ -457,6 +495,9 @@ class VoiceInputApp:
         self._tip_action.setEnabled(False)
         self._menu.addAction(self._tip_action)
         self._menu.addSeparator()
+        self._act_main = QAction("打开主界面")
+        self._act_main.triggered.connect(self._show_main_window)
+        self._menu.addAction(self._act_main)
         self._act_settings = QAction("设置…")
         self._act_settings.triggered.connect(self._open_settings)
         self._menu.addAction(self._act_settings)
@@ -532,11 +573,20 @@ class VoiceInputApp:
         self._menu.addAction(self._act_quit)
         self.tray.setContextMenu(self._menu)
         self.tray.setToolTip("听晓")
+        # 左键/双击托盘图标 → 打开主界面(Windows 习惯;mac 菜单栏点按会弹菜单,不冲突)
+        self.tray.activated.connect(
+            lambda reason: self._show_main_window()
+            if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick) else None)
         self.tray.show()
 
     def _set_tray_tip(self, text):
         self._tip_action.setText(text)
         self.tray.setToolTip(f"听晓 — {text}")
+        if self.main_win is not None:
+            try:
+                self.main_win.set_status(text)
+            except Exception:
+                pass
 
     def _open_log(self):
         try:
@@ -595,6 +645,11 @@ class VoiceInputApp:
             from corrector import Corrector
 
             self.cor = Corrector(self.cfg.get("llm"), self.cfg.get("hotwords"), self.cfg.get("glossary"))
+            try:  # 桌宠灵魂跟随云端润色开关(隐私联动)
+                from pet_brain import PetBrain
+                self.pet_brain = PetBrain(self.cfg.get("llm"), self.cfg.get("pet_brain"))
+            except Exception:
+                traceback.print_exc()
             self.recorder.name_contains = self.cfg.get("mic_name_contains", "")
             self.recorder.persistent = self.cfg.get("persistent_mic", True)
             self.recorder.open()
@@ -907,13 +962,16 @@ class VoiceInputApp:
                 pass
 
     def _pet_react_done(self, text):
-        """听写完成:桌宠开心一下 + 复述听到的话,几秒后回待命。"""
+        """听写完成:桌宠开心一下、记住这句;偶尔让"灵魂"冒一句自己的反应(不复述原话)。"""
         if not self.pet:
             return
         self._remember_phrase(text)
+        self._last_activity_t = time.monotonic()
         self._pet_state("happy")
-        self.pet.say(text[:14])
         QTimer.singleShot(2600, lambda: self._pet_state("idle") if not self.recording else None)
+        # 不再复述听到的话;约 1/3 的句子、且距上次够久时,让它走心地反应一句
+        if random.random() < 0.34:
+            self._pet_speak("heard", min_gap=40)
 
     def _seed_pet_memory(self):
         """从使用记录尾部读回最近说过的话,让桌宠"记得"(跨重启)。"""
@@ -944,13 +1002,61 @@ class VoiceInputApp:
     def _on_pet_click(self):
         if not self.pet:
             return
-        if self._pet_mem:
-            self.pet.say("你说过:" + random.choice(self._pet_mem[-30:])[:16])
-        else:
-            self.pet.say(random.choice(
-                ["我在听~", "按住热键跟我说话吧", "今天想说点什么?", "陪着你呢"]))
-        self._pet_state("happy")
+        self._last_activity_t = time.monotonic()
+        self._pet_state("happy")   # 即时反馈:蹦一下
         QTimer.singleShot(2200, lambda: self._pet_state("idle") if not self.recording else None)
+        self._pet_speak("poke", min_gap=1.2)   # 灵魂:后台想一句有性格的话再说出来
+
+    def _pet_speak(self, trigger, min_gap=0.0):
+        """后台让桌宠灵魂(DeepSeek)生成一句有性格的话,主线程再说出来。带在途保护与节流。"""
+        if not self.pet or getattr(self, "pet_brain", None) is None or self.recording:
+            return   # 录音中不发(说完话那条由 _pet_react_done 在完成后触发)
+        if self._brain_busy:
+            return
+        now = time.monotonic()
+        if min_gap and now - self._brain_last < min_gap:
+            return
+        self._brain_busy = True
+        mem = list(self._pet_mem)   # 快照,避免后台线程读时主线程在追加
+
+        def work():
+            line = ""
+            try:
+                line = self.pet_brain.react(trigger, mem, activity=len(mem))
+            except Exception:
+                traceback.print_exc()
+            finally:
+                self._brain_last = time.monotonic()
+                self._brain_busy = False
+            if line:
+                self.bridge.pet_say.emit(line)
+
+        try:
+            threading.Thread(target=work, daemon=True).start()
+        except Exception:
+            self._brain_busy = False   # 线程都起不来时必须释放在途标志,否则永久沉默
+            traceback.print_exc()
+
+    def _on_pet_say(self, line):
+        if not self.pet or self.recording:
+            return
+        self.pet.say(line, 3.6)
+        self._pet_state("happy")
+        QTimer.singleShot(3200, lambda: self._pet_state("idle") if not self.recording else None)
+
+    def _pet_idle_tick(self):
+        """主动性:最近有过互动、间隔够久、随机命中时,桌宠自己凑过来碎碎念一句。"""
+        if not self.pet or self.recording or getattr(self, "pet_brain", None) is None:
+            return
+        if not (self.cfg.get("pet_brain") or {}).get("proactive", True):
+            return
+        now = time.monotonic()
+        if now - self._last_activity_t > 900:   # 15分钟没动静就别自言自语
+            return
+        if now - self._brain_last < 200:         # 距上次开口至少约3分钟
+            return
+        if random.random() < 0.5:
+            self._pet_speak("idle", min_gap=180)
 
     def _on_xfer_offer(self, offer_id, sender, name, size):
         from transfer_ui import human_size
@@ -974,9 +1080,8 @@ class VoiceInputApp:
 
     def _on_xfer_in(self, kind, frm, payload):
         if self.pet and not self.recording:
-            self._pet_state("happy")
-            self.pet.say(f"{frm}发来东西啦~")
-            QTimer.singleShot(2600, lambda: self._pet_state("idle") if not self.recording else None)
+            self._last_activity_t = time.monotonic()
+            self._pet_speak("gift", min_gap=5)   # 灵魂:好奇地凑过去说一句
         if kind == "text":
             try:
                 from PySide6.QtWidgets import QApplication as _QA
@@ -1115,6 +1220,17 @@ class VoiceInputApp:
             except Exception:
                 traceback.print_exc()
 
+    def _show_main_window(self):
+        """主界面:懒创建;关闭=隐藏回托盘。打开时在任务栏正常显示。"""
+        try:
+            if getattr(self, "main_win", None) is None:
+                from main_window import MainWindow
+                self.main_win = MainWindow(self, QIcon(brand_pixmap(256)), f"v{VERSION}")
+                self.main_win.set_status(self.tray.toolTip().replace("听晓 — ", "") or "就绪")
+            self.main_win.present()
+        except Exception:
+            traceback.print_exc()
+
     def _reload_memory_bank(self):
         """配置改动后重建记忆库实例,让开关/主人名即时生效(无需重启)。"""
         try:
@@ -1141,6 +1257,43 @@ class VoiceInputApp:
                 self._bind_hotkey(self.cfg.get("hotkey", "f9"))
             except Exception:
                 traceback.print_exc()
+
+    def _schedule_relaunch(self):
+        """安排一个"等本进程退出后再拉起新实例"的独立看门进程。成功返回 True。
+        Windows 顺带完成 exe 换新:更新包里若带 app/VoiceInput.exe.new,重启前先换掉旧 exe
+        (运行中的 exe 被系统锁定,只能退出后由外部进程替换)。"""
+        import subprocess
+        try:
+            if sys.platform == "win32":
+                root = os.path.dirname(BASE)          # BASE=<root>/app
+                exe = os.path.join(root, "VoiceInput.exe")
+                if not os.path.isfile(exe):
+                    return False
+                bat = os.path.join(root, "_tingxiao_restart.bat")
+                with open(bat, "w", encoding="gbk", errors="replace") as f:
+                    f.write(
+                        "@echo off\r\n"
+                        "ping -n 8 127.0.0.1 >nul\r\n"          # 等旧进程退出、释放互斥锁(_quit最长等4s)
+                        "if exist \"%~dp0app\\VoiceInput.exe.new\" "
+                        "move /y \"%~dp0app\\VoiceInput.exe.new\" \"%~dp0VoiceInput.exe\" >nul\r\n"
+                        "start \"\" \"%~dp0VoiceInput.exe\"\r\n"
+                        "del \"%~f0\"\r\n")
+                DETACHED = 0x8 | 0x08000000 | 0x200   # DETACHED|NO_WINDOW|NEW_GROUP
+                subprocess.Popen(["cmd", "/c", bat], cwd=root,
+                                 creationflags=DETACHED, close_fds=True)
+                return True
+            if sys.platform == "darwin" and FROZEN:
+                # sys.executable = .../听晓.app/Contents/MacOS/听晓 → 上溯到 .app
+                bundle = os.path.abspath(os.path.join(
+                    os.path.dirname(sys.executable), "..", ".."))
+                if not bundle.endswith(".app"):
+                    return False
+                subprocess.Popen(["sh", "-c", f'sleep 5; open -n "{bundle}"'],
+                                 start_new_session=True, close_fds=True)
+                return True
+        except Exception:
+            traceback.print_exc()
+        return False
 
     def _install_update(self, _checked=False, zip_path=None):
         from PySide6.QtWidgets import QFileDialog
@@ -1185,11 +1338,16 @@ class VoiceInputApp:
                                     self.cfg[k][k2] = v2
                 except Exception:
                     traceback.print_exc()
-                QMessageBox.information(
-                    None, "更新完成",
-                    f"{msg}\n\n程序即将退出,请重新双击 VoiceInput.exe。")
-                quitting = True
-                self._quit()
+                if self.cfg.get("update_auto_restart", True) and self._schedule_relaunch():
+                    self.bridge.notify.emit("更新完成", "听晓将自动重启,请稍候…", 3000)
+                    quitting = True
+                    QTimer.singleShot(600, self._quit)  # 让气泡先出来
+                else:
+                    QMessageBox.information(
+                        None, "更新完成",
+                        f"{msg}\n\n程序即将退出,请重新双击 VoiceInput.exe。")
+                    quitting = True
+                    self._quit()
             else:
                 QMessageBox.warning(None, "更新失败", msg)
         finally:
