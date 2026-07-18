@@ -84,7 +84,8 @@ def _dec(v):
 
 
 class TransferService:
-    def __init__(self, cfg, on_incoming=None, on_peers=None, on_offer=None):
+    def __init__(self, cfg, on_incoming=None, on_peers=None, on_offer=None,
+                 on_progress=None):
         c = cfg or {}
         self.name = c.get("device_name") or socket.gethostname()
         self.family_code = c.get("family_code", "")
@@ -98,6 +99,7 @@ class TransferService:
         self.on_incoming = on_incoming or (lambda *a: None)   # (kind, sender, payload)
         self.on_peers = on_peers or (lambda *a: None)
         self.on_offer = on_offer or (lambda *a: None)         # (offer_id, sender, name, size)
+        self.on_progress = on_progress or (lambda *a: None)   # (dict:接收实时进度/速度)
         self.error = ""
         self._peers = {}
         self._lock = threading.Lock()
@@ -111,6 +113,7 @@ class TransferService:
         self._pending_offers = {}   # offer_id -> {event, accept}
         self._tickets = {}          # ticket -> {name,size,sender,exp}
         self._plock = threading.Lock()
+        self._name_lock = threading.Lock()   # 并发接收同名文件时,定名+落盘原子化
 
     def local_ip(self):
         if time.time() - self._ip_ts > 30:
@@ -409,14 +412,26 @@ class TransferService:
 
             def _recv_file(self, service, length, fname, sender):
                 fname = _safe_name(fname)
-                dst = os.path.join(service.save_dir, fname)
-                base, ext = os.path.splitext(dst)
-                i = 1
-                while os.path.exists(dst):
-                    dst = f"{base}({i}){ext}"
-                    i += 1
-                tmp = dst + ".part"
+                rid = uuid.uuid4().hex[:12]
+                # 每次接收用唯一临时名,两个同名接收永不共用 .part(避免交叉写坏)
+                tmp = os.path.join(service.save_dir, f".tx_{rid}.part")
+                shown = fname
+                t0 = time.time()
                 got = 0
+                speed = 0.0
+                last_emit = 0.0
+                last_got = 0
+                last_t = t0
+
+                def emit(phase, ok=True):
+                    try:
+                        service.on_progress({"id": rid, "from": sender, "name": shown,
+                                             "got": got, "total": length, "speed": speed,
+                                             "phase": phase, "ok": ok})
+                    except Exception:
+                        pass
+
+                emit("start")
                 try:
                     with open(tmp, "wb") as f:
                         while got < length:
@@ -425,21 +440,48 @@ class TransferService:
                                 break
                             f.write(chunk)
                             got += len(chunk)
+                            now = time.time()
+                            if now - last_emit >= 0.12 or got >= length:
+                                dt = now - last_t
+                                if dt > 0:
+                                    inst = (got - last_got) / dt
+                                    speed = inst if speed == 0 else speed * 0.6 + inst * 0.4
+                                    last_t, last_got = now, got
+                                last_emit = now
+                                emit("progress")
                     if got < length:
                         raise IOError("incomplete")
-                    os.replace(tmp, dst)
+                    # 定名与落盘在锁内完成:两个同名接收也能各得 name 和 name(1)
+                    with service._name_lock:
+                        dst = os.path.join(service.save_dir, fname)
+                        base, ext = os.path.splitext(dst)
+                        i = 1
+                        while os.path.exists(dst):
+                            dst = f"{base}({i}){ext}"
+                            i += 1
+                        os.replace(tmp, dst)
                 except Exception:
                     try:
                         if os.path.exists(tmp):
                             os.remove(tmp)
                     except OSError:
                         pass
+                    emit("done", ok=False)
                     return self._deny(500, "recv failed")
-                self._json({"ok": True})
+                # 完成态(记历史/通知/清UI行)在写回响应之前做:即使对端此刻断开,
+                # 文件已落盘、收件箱进度条会收起、也会记录并弹通知
+                shown = os.path.basename(dst)
+                secs = max(1e-6, time.time() - t0)
                 service.log_history("recv", {"kind": "file", "from": sender,
                                              "name": os.path.basename(dst), "path": dst,
-                                             "size": length})
+                                             "size": length, "secs": round(secs, 2),
+                                             "avg_bps": int(length / secs)})
+                emit("done", ok=True)
                 service.on_incoming("file", sender, dst)
+                try:
+                    self._json({"ok": True})
+                except OSError:
+                    pass  # 对端已断开;文件已落盘、UI/历史/通知均已完成
 
         try:
             self._httpd = http.server.ThreadingHTTPServer(("", self.http_port), Handler)

@@ -84,6 +84,15 @@
     "dir": "data",
     "max_total_mb": 2048
   },
+  "memory_bank": {
+    "enabled": false,
+    "speaker_name": "我",
+    "dir": "memory"
+  },
+  "ui": {
+    "pet_enabled": true,
+    "pet_skin": "奶黄"
+  },
   "record_mode": "hold",
   "update_url": "https://api.github.com/repos/quanqiutongshi01-svg/VoiceInput/releases/latest",
   "polish_hotkey": "off",

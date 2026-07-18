@@ -127,6 +127,14 @@ class Overlay(QWidget):
         self._llm_badge = False
         self._set_state("processing", msg, AMBER)
 
+    def set_busy_text(self, msg):
+        """已在忙碌态时只刷新文字(接收进度高频更新用),不重播入场动画。"""
+        if self._state != "processing":
+            return self.show_busy(msg)
+        self._text = msg
+        self._animate_width()
+        self.update()
+
     # ---- 内部 ----
 
     def _set_state(self, state, text, color):

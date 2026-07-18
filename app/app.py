@@ -14,6 +14,7 @@
 import json
 import os
 import queue
+import random
 import sys
 import threading
 import time
@@ -213,7 +214,7 @@ from sounds import play  # noqa: E402  柔和提示音(带蜂鸣兜底)
 # 界面层(悬浮条/设置窗口/动画控件/历史)在 ui.py
 from ui import Overlay, SettingsDialog, HistoryDialog  # noqa: E402
 
-VERSION = "3.6.1"
+VERSION = "3.7.0"
 
 
 def brand_pixmap(size):
@@ -261,6 +262,7 @@ class Bridge(QObject):
     xfer_in = Signal(str, str, str) # 收到快传(kind, from, payload)
     xfer_peers = Signal(list)       # 在线设备表变化
     xfer_offer = Signal(str, str, str, int)  # 对方请求发送(offer_id, from, name, size)
+    xfer_recv = Signal(dict)        # 接收实时进度/速度(phase:start/progress/done)
     perm_needed = Signal(str)       # 缺 macOS 输入监控权限
 
 
@@ -299,6 +301,7 @@ class VoiceInputApp:
         self.bridge.xfer_in.connect(self._on_xfer_in, Qt.QueuedConnection)
         self.bridge.xfer_peers.connect(self._on_xfer_peers, Qt.QueuedConnection)
         self.bridge.xfer_offer.connect(self._on_xfer_offer, Qt.QueuedConnection)
+        self.bridge.xfer_recv.connect(self._on_xfer_recv, Qt.QueuedConnection)
         self.bridge.perm_needed.connect(self._on_perm_needed, Qt.QueuedConnection)
 
         self.ready = False
@@ -313,6 +316,13 @@ class VoiceInputApp:
         self._polishing = False      # 润色单飞标志
         self._xfer = None            # TransferService
         self._xfer_dialog = None
+        self._inbox_dialog = None    # 收件箱(非模态,实时刷新接收进度)
+        self._recv_overlay_last = 0.0  # 悬浮条接收进度节流
+        self._dictating = False      # 松键后识别/出字期间占用悬浮条,别让接收进度抢
+        self._dict_done_t = 0.0      # 上次听写结果上屏的时刻(结果展示窗内也让位)
+        self.pet = None              # 桌宠 PetWidget
+        self._pet_mem = []           # 桌宠记得的话
+        self._pet_idle_timer = None
         self._update_timer = QTimer()  # 每24小时静默再查一次
         self._update_timer.setInterval(24 * 3600 * 1000)
         self._update_timer.timeout.connect(
@@ -325,6 +335,7 @@ class VoiceInputApp:
         self._draft_q = queue.Queue(maxsize=512)   # 常驻:ndarray=音频块, tuple=(标记, gen)
         self._jobs = queue.Queue()
 
+        self._ensure_pet()
         QTimer.singleShot(50, self._load_engines)
 
     # -- 初始化(可重入:启动失败后从设置窗口重试) --
@@ -359,6 +370,18 @@ class VoiceInputApp:
                 if not os.path.isabs(os.path.expanduser(_ad)):
                     _arch["dir"] = os.path.join(BASE, _ad)
                 self.arc = Archiver(_arch)
+                # 声音记忆库(按人永久归档音频+文字+声纹,为未来声音克隆备料)
+                try:
+                    from memory_bank import MemoryBank
+                    _mdir = self.cfg.get("models_dir", "models")
+                    _mdir = _mdir if os.path.isabs(_mdir) else os.path.join(BASE, _mdir)
+                    self.mem = MemoryBank(self.cfg.get("memory_bank") or {},
+                                          BASE, os.path.join(_mdir, "campplus.onnx"))
+                    if self.mem.enabled:
+                        print(f"[app] 声音记忆库已开启 → {self.mem.speaker}")
+                except Exception as e:
+                    self.mem = None
+                    print(f"[app] 声音记忆库初始化失败(不影响听写): {e}")
                 self.injector = make_injector(
                     self.cfg.get("inject_method", "sendinput"),
                     self.cfg.get("inject_fallback_clipboard", True),
@@ -446,6 +469,36 @@ class VoiceInputApp:
         self._act_inbox = QAction("家庭快传 · 收件箱…")
         self._act_inbox.triggered.connect(self._open_inbox)
         self._menu.addAction(self._act_inbox)
+        self._menu.addSeparator()
+        self._act_memory = QAction("声音记忆库…")
+        self._act_memory.triggered.connect(self._open_memory_bank)
+        self._menu.addAction(self._act_memory)
+        # 桌面宠物子菜单(显示开关 + 换形象)
+        _ui = self.cfg.get("ui") or {}
+        self._menu_pet = self._menu.addMenu("桌面宠物")
+        self._act_pet_on = QAction("显示桌宠")
+        self._act_pet_on.setCheckable(True)
+        self._act_pet_on.setChecked(bool(_ui.get("pet_enabled", True)))
+        self._act_pet_on.triggered.connect(self._toggle_pet)
+        self._menu_pet.addAction(self._act_pet_on)
+        self._act_pet_reset = QAction("重置位置")
+        self._act_pet_reset.triggered.connect(self._reset_pet_pos)
+        self._menu_pet.addAction(self._act_pet_reset)
+        self._menu_pet.addSeparator()
+        self._pet_skin_actions = []
+        try:
+            from pet import SKINS as _PET_SKINS
+            _skins = list(_PET_SKINS.keys())
+        except Exception:
+            _skins = ["奶黄", "薄荷", "樱粉", "天蓝"]
+        _cur_skin = _ui.get("pet_skin", "奶黄")
+        for skin in _skins:
+            a = QAction(skin)
+            a.setCheckable(True)
+            a.setChecked(skin == _cur_skin)
+            a.triggered.connect(lambda _c=False, s=skin: self._set_pet_skin(s))
+            self._menu_pet.addAction(a)
+            self._pet_skin_actions.append((skin, a))
         self._menu.addSeparator()
         self._act_history = QAction("最近听写…")
         self._act_history.triggered.connect(self._open_history)
@@ -677,7 +730,8 @@ class VoiceInputApp:
                 tc,
                 on_incoming=lambda k, f, p: self.bridge.xfer_in.emit(k, f, p),
                 on_peers=lambda ps: self.bridge.xfer_peers.emit(ps),
-                on_offer=lambda oid, f, n, sz: self.bridge.xfer_offer.emit(oid, f, n, sz))
+                on_offer=lambda oid, f, n, sz: self.bridge.xfer_offer.emit(oid, f, n, sz),
+                on_progress=lambda ev: self.bridge.xfer_recv.emit(ev))
             self._xfer.start()
             if self._xfer.error:
                 self.bridge.notify.emit("快传启动异常", self._xfer.error, 6000)
@@ -729,7 +783,157 @@ class VoiceInputApp:
             return
         from transfer_ui import InboxDialog
 
-        InboxDialog(self._xfer).exec()
+        # 非模态:开着也能实时看到接收进度;已开则前置
+        if self._inbox_dialog is None:
+            self._inbox_dialog = InboxDialog(self._xfer)
+            self._inbox_dialog.finished.connect(self._on_inbox_closed)
+        else:
+            self._inbox_dialog._reload_history()
+        self._inbox_dialog.show()
+        self._inbox_dialog.raise_()
+        self._inbox_dialog.activateWindow()
+
+    def _on_inbox_closed(self, _result=0):
+        self._inbox_dialog = None
+
+    def _on_xfer_recv(self, ev):
+        """接收实时进度/速度:悬浮条 ambient 显示 + 收件箱(若开)富进度 + 桌宠反应。"""
+        phase = ev.get("phase")
+        name = ev.get("name", "文件")
+        got, total = int(ev.get("got", 0)), int(ev.get("total", 0))
+        # 收件箱富进度条(始终转发)
+        if self._inbox_dialog is not None:
+            try:
+                self._inbox_dialog.recv_sig.emit(ev)
+            except Exception:
+                pass
+        # 桌宠:开始接收→思考态;失败→无条件回待命(否则会一直转圈);成功由 _on_xfer_in 处理
+        if phase == "start" and not self._dictating_now():
+            self._pet_state("processing")
+        elif phase == "done" and not ev.get("ok"):
+            self._pet_state("idle")
+        # 悬浮条 ambient:听写(录音/识别/结果展示窗)占用悬浮条时让位,别抢
+        if self._dictating_now():
+            if phase == "done" and not ev.get("ok"):
+                self.bridge.notify.emit("接收失败", name, 4000)
+            return
+        if phase == "start":
+            self.overlay.show_busy(f"正在接收 {name}…")
+            self._recv_overlay_last = 0.0
+        elif phase == "progress":
+            now = time.time()
+            if now - self._recv_overlay_last >= 0.3:
+                self._recv_overlay_last = now
+                from transfer_ui import speed_str
+                pct = int(got * 100 / total) if total else 0
+                self.overlay.set_busy_text(
+                    f"接收 {name}  {pct}%  ·  {speed_str(ev.get('speed', 0))}")
+        elif phase == "done" and not ev.get("ok"):
+            self.overlay.show_error(f"接收失败:{name}")
+        # 成功完成时 on_incoming 会另发"收到文件"通知并让悬浮条转 done 态,这里不重复
+
+    def _dictating_now(self):
+        """听写是否正占用悬浮条:录音中 / 松键后识别中 / 刚出结果 1.6s 内。"""
+        return (self.recording or self._dictating
+                or time.monotonic() - self._dict_done_t < 1.6)
+
+    # -- 桌面宠物 --
+
+    def _ensure_pet(self):
+        """按配置创建/销毁桌宠(主线程)。"""
+        want = bool((self.cfg.get("ui") or {}).get("pet_enabled", True))
+        if want and self.pet is None:
+            try:
+                from pet import PetWidget
+                self.pet = PetWidget(
+                    self.cfg.setdefault("ui", {}),
+                    get_level=lambda: getattr(getattr(self, "recorder", None), "level", 0.0))
+                self.pet.clicked.connect(self._on_pet_click)
+                self._seed_pet_memory()
+                self.pet.show()
+            except Exception:
+                traceback.print_exc()
+                self.pet = None
+        elif not want and self.pet is not None:
+            try:
+                self.pet.hide()
+                self.pet.deleteLater()
+            except Exception:
+                pass
+            self.pet = None
+
+    def _toggle_pet(self, checked):
+        self.cfg.setdefault("ui", {})["pet_enabled"] = bool(checked)
+        self._save_config()
+        self._ensure_pet()
+
+    def _set_pet_skin(self, skin):
+        self.cfg.setdefault("ui", {})["pet_skin"] = skin
+        self._save_config()
+        if self.pet:
+            self.pet.skin = skin
+            self.pet.update()
+        for s, act in getattr(self, "_pet_skin_actions", []):
+            act.setChecked(s == skin)
+
+    def _reset_pet_pos(self):
+        if self.pet:
+            self.pet.reset_position()
+        self.cfg.setdefault("ui", {}).pop("pet_pos", None)
+        self._save_config()
+
+    def _pet_state(self, state):
+        if self.pet:
+            try:
+                self.pet.set_state(state)
+            except Exception:
+                pass
+
+    def _pet_react_done(self, text):
+        """听写完成:桌宠开心一下 + 复述听到的话,几秒后回待命。"""
+        if not self.pet:
+            return
+        self._remember_phrase(text)
+        self._pet_state("happy")
+        self.pet.say(text[:14])
+        QTimer.singleShot(2600, lambda: self._pet_state("idle") if not self.recording else None)
+
+    def _seed_pet_memory(self):
+        """从使用记录尾部读回最近说过的话,让桌宠"记得"(跨重启)。"""
+        self._pet_mem = []
+        try:
+            _d = (self.cfg.get("archive") or {}).get("dir", "data")
+            if not os.path.isabs(_d):
+                _d = os.path.join(BASE, _d)
+            p = os.path.join(_d, "records.jsonl")
+            if os.path.isfile(p):
+                for ln in open(p, encoding="utf-8").read().splitlines()[-80:]:
+                    try:
+                        t = (json.loads(ln).get("corrected") or "").strip()
+                        if t:
+                            self._pet_mem.append(t)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        self._pet_mem = self._pet_mem[-50:]
+
+    def _remember_phrase(self, text):
+        text = (text or "").strip()
+        if text:
+            self._pet_mem.append(text)
+            self._pet_mem = self._pet_mem[-50:]
+
+    def _on_pet_click(self):
+        if not self.pet:
+            return
+        if self._pet_mem:
+            self.pet.say("你说过:" + random.choice(self._pet_mem[-30:])[:16])
+        else:
+            self.pet.say(random.choice(
+                ["我在听~", "按住热键跟我说话吧", "今天想说点什么?", "陪着你呢"]))
+        self._pet_state("happy")
+        QTimer.singleShot(2200, lambda: self._pet_state("idle") if not self.recording else None)
 
     def _on_xfer_offer(self, offer_id, sender, name, size):
         from transfer_ui import human_size
@@ -752,6 +956,10 @@ class VoiceInputApp:
             self._xfer_dialog.refresh_peers(peers)
 
     def _on_xfer_in(self, kind, frm, payload):
+        if self.pet and not self.recording:
+            self._pet_state("happy")
+            self.pet.say(f"{frm}发来东西啦~")
+            QTimer.singleShot(2600, lambda: self._pet_state("idle") if not self.recording else None)
         if kind == "text":
             try:
                 from PySide6.QtWidgets import QApplication as _QA
@@ -884,6 +1092,33 @@ class VoiceInputApp:
                 _d = os.path.join(BASE, _d)
             dlg = HistoryDialog(os.path.join(_d, "records.jsonl"))
             dlg.exec()
+        finally:
+            try:
+                self._bind_hotkey(self.cfg.get("hotkey", "f9"))
+            except Exception:
+                traceback.print_exc()
+
+    def _reload_memory_bank(self):
+        """配置改动后重建记忆库实例,让开关/主人名即时生效(无需重启)。"""
+        try:
+            from memory_bank import MemoryBank
+            _mdir = self.cfg.get("models_dir", "models")
+            _mdir = _mdir if os.path.isabs(_mdir) else os.path.join(BASE, _mdir)
+            self.mem = MemoryBank(self.cfg.get("memory_bank") or {},
+                                  BASE, os.path.join(_mdir, "campplus.onnx"))
+        except Exception:
+            traceback.print_exc()
+
+    def _open_memory_bank(self):
+        # 对话框期间热键会把识别注入进来,先摘掉
+        self._abort_recording()
+        self._unbind_hotkey()
+        try:
+            from memory_ui import MemoryBankDialog
+            MemoryBankDialog(self).exec()
+        except Exception:
+            traceback.print_exc()
+            QMessageBox.warning(None, "声音记忆库", "打开失败,详情见日志")
         finally:
             try:
                 self._bind_hotkey(self.cfg.get("hotkey", "f9"))
@@ -1030,10 +1265,12 @@ class VoiceInputApp:
                 self._put_draft_marker(("new", self._gen))
             self.recorder.start_capture(tap=self._draft_q if self.draft else None)
             self.recording = True
+            self._dictating = False   # 新一句开始,旧的识别占用窗作废
             self.t0 = time.time()
             if not quiet:
                 play("start", self.cfg.get("beep", True))
             self.overlay.show_listening()
+            self._pet_state("listening")
             if self.cfg.get("record_mode", "hold") == "toggle":
                 self._watch.start()
         except Exception:
@@ -1059,8 +1296,13 @@ class VoiceInputApp:
             self._put_draft_marker(("end", self._gen))
         if len(samples) == 0:
             self.overlay.show_error("没有录到声音")
+            self._dictating = False
+            self._dict_done_t = time.monotonic()
+            self._pet_state("idle")
             return
+        self._dictating = True   # 识别+出字期间占用悬浮条
         self.overlay.show_processing()
+        self._pet_state("processing")
         self._jobs.put((self._gen, samples, sr, truncated))
 
     def _abort_recording(self):
@@ -1068,6 +1310,7 @@ class VoiceInputApp:
         _watch/_key_down 无条件回收,顺带清掉任何泄漏。"""
         self._watch.stop()
         self._key_down = False
+        self._dictating = False
         if not self.recording:
             return
         self.recording = False
@@ -1199,6 +1442,8 @@ class VoiceInputApp:
                     traceback.print_exc()
                     print("[app] 注入失败(不影响存档)")
                 self.arc.save(samples16, raw, fixed)
+                if getattr(self, "mem", None) is not None:
+                    self.mem.save(samples, sr, samples16, raw, fixed)
                 self.bridge.done.emit(gen, fixed, self.cor.last_llm_used)
                 if self.cor.circuit_just_opened:
                     self.cor.circuit_just_opened = False
@@ -1227,12 +1472,20 @@ class VoiceInputApp:
         if self.recording:  # 新一句正在录,别打断聆听态
             return
         self.overlay.show_done(text, llm_used)
+        self._dictating = False
+        self._dict_done_t = time.monotonic()  # 结果展示窗内接收进度仍让位
+        if gen != -1 and text:  # 真实听写(非启动/润色提示)才让桌宠复述与记忆
+            self._pet_react_done(text)
 
     def _on_error(self, gen, msg):
         if gen != -1 and (gen != self._gen or self.recording):
             print(f"[app] 过期会话#{gen}错误: {msg}")
             return
         self.overlay.show_error(msg)
+        self._dictating = False
+        self._dict_done_t = time.monotonic()
+        if not self.recording:
+            self._pet_state("idle")
 
     # -- 退出 --
 
@@ -1247,6 +1500,8 @@ class VoiceInputApp:
                 time.sleep(0.1)
             if hasattr(self, "recorder"):
                 self.recorder.close()
+            if self.pet:
+                self.pet.hide()
         except Exception:
             pass
         self.tray.hide()

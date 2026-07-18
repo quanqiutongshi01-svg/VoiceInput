@@ -45,6 +45,13 @@ def human_size(n):
         n /= 1024
 
 
+def speed_str(bps):
+    try:
+        return human_size(float(bps)) + "/s"
+    except (TypeError, ValueError):
+        return ""
+
+
 XFER_QSS = QSS + """
 #dropzone { background: #2c2c2e; border: 2px dashed #48484a; border-radius: 12px;
             color: #98989e; font-size: 14px; }
@@ -314,14 +321,53 @@ class QuickTransferDialog(QDialog):
         self._hist_scroll.setWidget(w)
 
 
+class RecvRow(QFrame):
+    """一个正在接收的文件:名字 + 进度条 + 百分比·速度。"""
+
+    def __init__(self, ev):
+        super().__init__()
+        self.setObjectName("chip")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 8, 10, 8)
+        lay.setSpacing(4)
+        self.title = QLabel()
+        self.title.setStyleSheet("color:#f2f2f7;font-size:13px;")
+        lay.addWidget(self.title)
+        row = QHBoxLayout(); row.setSpacing(8)
+        self.bar = QProgressBar(); self.bar.setTextVisible(False)
+        row.addWidget(self.bar, 1)
+        self.stat = QLabel()
+        self.stat.setStyleSheet("color:#98989e;font-size:12px;")
+        self.stat.setMinimumWidth(150)
+        self.stat.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        row.addWidget(self.stat)
+        lay.addLayout(row)
+        self.update_ev(ev)
+
+    def update_ev(self, ev):
+        name = ev.get("name", "文件")
+        frm = ev.get("from", "")
+        got, total = int(ev.get("got", 0)), int(ev.get("total", 0))
+        self.title.setText(f"⬇ {name}   来自 {frm}")
+        if total > 0:
+            self.bar.setRange(0, total); self.bar.setValue(min(got, total))
+            pct = int(got * 100 / total)
+        else:
+            self.bar.setRange(0, 0); pct = 0
+        self.stat.setText(f"{pct}%  ·  {human_size(got)}/{human_size(total)}"
+                          f"  ·  {speed_str(ev.get('speed', 0))}")
+
+
 class InboxDialog(QDialog):
-    """收件箱:接收记录 + 打开文件/所在文件夹 + 打开收件夹。"""
+    """收件箱:实时接收进度/速度 + 接收记录 + 打开文件/所在文件夹。"""
+    recv_sig = Signal(dict)   # 接收进度事件(主线程转发进来)
 
     def __init__(self, service, parent=None):
         super().__init__(parent)
         self.service = service
+        self._active = {}     # recv_id -> RecvRow
         self.setWindowTitle("听晓快传 · 收件箱")
-        self.setMinimumSize(480, 560)
+        self.setMinimumSize(500, 580)
         self.setStyleSheet(XFER_QSS)
         self.setFont(ui_font(13))
 
@@ -332,16 +378,20 @@ class InboxDialog(QDialog):
         openf.clicked.connect(lambda: open_path(service.save_dir))
         top.addWidget(openf)
 
-        listw = QWidget()
-        lv = QVBoxLayout(listw)
-        lv.setContentsMargins(0, 6, 0, 0)
-        recs = service.history("recv")
-        if not recs:
-            lv.addWidget(QLabel("还没有收到任何东西"))
-        for r in recs:
-            lv.addWidget(self._row(r))
-        lv.addStretch(1)
-        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(listw)
+        # 正在接收区(有活动接收时才显示)
+        self._active_box = QWidget()
+        abv = QVBoxLayout(self._active_box)
+        abv.setContentsMargins(0, 4, 0, 4); abv.setSpacing(6)
+        lbl = QLabel("正在接收")
+        lbl.setStyleSheet("color:#98989e;font-size:12px;")
+        abv.addWidget(lbl)
+        self._active_lay = QVBoxLayout(); self._active_lay.setSpacing(6)
+        abv.addLayout(self._active_lay)
+        self._active_box.setVisible(False)
+
+        self._hist_scroll = QScrollArea()
+        self._hist_scroll.setWidgetResizable(True)
+        self._reload_history()
 
         close = QPushButton("关闭"); close.clicked.connect(self.reject)
         bottom = QHBoxLayout(); bottom.addStretch(1); bottom.addWidget(close)
@@ -349,8 +399,49 @@ class InboxDialog(QDialog):
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 12, 14, 12)
         root.addLayout(top)
-        root.addWidget(scroll, 1)
+        root.addWidget(self._active_box)
+        root.addWidget(QLabel("接收记录"))
+        root.addWidget(self._hist_scroll, 1)
         root.addLayout(bottom)
+
+        self.recv_sig.connect(self._on_recv)
+
+    # ---- 实时接收 ----
+
+    def _on_recv(self, ev):
+        phase = ev.get("phase")
+        rid = ev.get("id")
+        if phase in ("start", "progress"):
+            row = self._active.get(rid)
+            if not row:
+                row = RecvRow(ev)
+                self._active[rid] = row
+                self._active_lay.insertWidget(0, row)
+                self._active_box.setVisible(True)
+            else:
+                row.update_ev(ev)
+        elif phase == "done":
+            row = self._active.pop(rid, None)
+            if row:
+                row.setParent(None)
+                row.deleteLater()
+            if not self._active:
+                self._active_box.setVisible(False)
+            self._reload_history()
+
+    # ---- 记录 ----
+
+    def _reload_history(self):
+        listw = QWidget()
+        lv = QVBoxLayout(listw)
+        lv.setContentsMargins(0, 6, 0, 0)
+        recs = self.service.history("recv")
+        if not recs:
+            lv.addWidget(QLabel("还没有收到任何东西"))
+        for r in recs:
+            lv.addWidget(self._row(r))
+        lv.addStretch(1)
+        self._hist_scroll.setWidget(listw)
 
     def _row(self, r):
         f = QFrame(); f.setObjectName("chip")
@@ -360,7 +451,8 @@ class InboxDialog(QDialog):
         frm = r.get("from", "")
         if r.get("kind") == "file":
             name = r.get("name", "文件")
-            info = QLabel(f"{name}\n{when} · 来自 {frm} · {human_size(r.get('size',0))}")
+            extra = f" · 均速 {speed_str(r['avg_bps'])}" if r.get("avg_bps") else ""
+            info = QLabel(f"{name}\n{when} · 来自 {frm} · {human_size(r.get('size',0))}{extra}")
         else:
             info = QLabel(f"[文字] {r.get('text','')[:30]}\n{when} · 来自 {frm}")
         info.setStyleSheet("color:#f2f2f7;font-size:13px;")
