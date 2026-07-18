@@ -214,7 +214,7 @@ from sounds import play  # noqa: E402  柔和提示音(带蜂鸣兜底)
 # 界面层(悬浮条/设置窗口/动画控件/历史)在 ui.py
 from ui import Overlay, SettingsDialog, HistoryDialog  # noqa: E402
 
-VERSION = "3.7.2"
+VERSION = "3.7.3"
 
 
 def brand_pixmap(size):
@@ -501,6 +501,9 @@ class VoiceInputApp:
         self._act_settings = QAction("设置…")
         self._act_settings.triggered.connect(self._open_settings)
         self._menu.addAction(self._act_settings)
+        self._act_vocab = QAction("热词管理…")
+        self._act_vocab.triggered.connect(self._open_vocab)
+        self._menu.addAction(self._act_vocab)
         self._act_log = QAction("打开日志")
         self._act_log.triggered.connect(self._open_log)
         self._menu.addAction(self._act_log)
@@ -1230,6 +1233,30 @@ class VoiceInputApp:
             self.main_win.present()
         except Exception:
             traceback.print_exc()
+
+    def _reload_corrector(self):
+        """热词/专有词改动后重建纠错器,立即生效(不需重启)。"""
+        try:
+            from corrector import Corrector
+            self.cor = Corrector(self.cfg.get("llm"), self.cfg.get("hotwords"),
+                                 self.cfg.get("glossary"))
+        except Exception:
+            traceback.print_exc()
+
+    def _open_vocab(self):
+        self._abort_recording()
+        self._unbind_hotkey()
+        try:
+            from vocab_ui import VocabDialog
+            VocabDialog(self).exec()
+        except Exception:
+            traceback.print_exc()
+            QMessageBox.warning(None, "热词管理", "打开失败,详情见日志")
+        finally:
+            try:
+                self._bind_hotkey(self.cfg.get("hotkey", "f9"))
+            except Exception:
+                traceback.print_exc()
 
     def _reload_memory_bank(self):
         """配置改动后重建记忆库实例,让开关/主人名即时生效(无需重启)。"""

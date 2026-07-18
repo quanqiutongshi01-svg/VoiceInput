@@ -15,8 +15,8 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel,
-    QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton,
-    QScrollArea, QVBoxLayout, QWidget,
+    QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit,
+    QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
 ACCENT = QColor(10, 132, 255)        # macOS 系统蓝
@@ -608,6 +608,13 @@ class SettingsDialog(QDialog):
         self.llm_key.setPlaceholderText("未配置(功能关闭,不会联网)")
         self.llm_model = QLineEdit(llm.get("model", "deepseek-chat"))
 
+        # 我的专有词:每行一个,告诉 AI 这些是正确写法、别乱改成别的词
+        from corrector import DEFAULT_GLOSSARY
+        gl = cfg.get("glossary") or list(DEFAULT_GLOSSARY)
+        self.glossary_edit = QPlainTextEdit("\n".join(gl))
+        self.glossary_edit.setPlaceholderText("每行一个,例如:\nChatcut\nSuno\n即梦")
+        self.glossary_edit.setFixedHeight(96)
+
         arch = cfg.get("archive") or {}
         self.archive_on = Switch(bool(arch.get("enabled", True)))
         size_mb = 0.0
@@ -655,6 +662,8 @@ class SettingsDialog(QDialog):
             _row("API 地址", self.llm_url),
             _row("API Key", self.llm_key),
             _row("模型", self.llm_model),
+            _row("我的专有词", self.glossary_edit,
+                 "你常用的产品名/工具名,每行一个。AI 会保留它们、不改成别的相近词"),
         ))
         v.addWidget(_header("数据"))
         v.addWidget(_card(
@@ -721,6 +730,14 @@ class SettingsDialog(QDialog):
         llm["model"] = self.llm_model.text().strip() or "deepseek-chat"
         llm.setdefault("timeout_seconds", 5)
         cfg["llm"] = llm
+        # 我的专有词:去重去空,保留顺序
+        seen, gl = set(), []
+        for w in self.glossary_edit.toPlainText().splitlines():
+            w = w.strip()
+            if w and w not in seen:
+                seen.add(w)
+                gl.append(w)
+        cfg["glossary"] = gl
         arch = cfg.get("archive") or {}
         arch["enabled"] = self.archive_on.isChecked()
         cfg["archive"] = arch

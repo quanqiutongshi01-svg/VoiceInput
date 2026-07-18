@@ -95,6 +95,7 @@ class MainWindow(QWidget):
         grid.setSpacing(8)
         acts = [
             ("设置…", app._open_settings),
+            ("热词管理…", app._open_vocab),
             ("最近听写…", app._open_history),
             ("声音记忆库…", app._open_memory_bank),
             ("家庭快传 · 发送…", app._open_transfer),

@@ -39,8 +39,11 @@ class Corrector:
         # hotwords: {正确词: [错误形1, 错误形2]}
         self.hotwords = hotwords or {}
         self.glossary = list(glossary) if glossary else list(DEFAULT_GLOSSARY)
-        gl = "6. 说话人的高频专有词表(识别结果里出现与这些词发音相近的错拼时,必须修正为词表写法):" \
-             + "、".join(self.glossary) if self.glossary else ""
+        gl = ("6. 说话人的高频专有词表(识别结果里出现与这些词发音相近的错拼时,修正为"
+              "**发音最接近**的那个词表写法,例如 'chat cut' 应改成 Chatcut 而非 ChatGPT;"
+              "不要为了常见就改成发音更远的词。词表里已正确的词保持不动。"
+              "词表之外拿不准的英文词,保持识别原文,不要替换成发音相近的其它常见品牌名):"
+              + "、".join(self.glossary)) if self.glossary else ""
         self.system_prompt = SPEAKER_PROFILE.format(glossary_line=gl)
         self.min_chars = int(self.cfg.get("min_chars_for_llm", 10))
         self._fails = 0
