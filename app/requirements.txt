@@ -5,3 +5,4 @@ numpy>=1.24,<3
 keyboard==0.13.5; sys_platform == "win32"
 PySide6-Essentials==6.10.3
 shiboken6==6.10.3
+pyobjc-framework-AVFoundation==11.1; sys_platform == "darwin"

@@ -15,6 +15,78 @@ import numpy as np
 import sounddevice as sd
 
 
+def _av_buffer_to_array(buffer, channels):
+    """Copy selected AVAudioPCMBuffer channels before Core Audio reuses it."""
+    frames = int(buffer.frameLength())
+    available = int(buffer.format().channelCount())
+    channel_data = buffer.floatChannelData()
+    if channel_data is None or frames <= 0 or available <= 0:
+        return np.empty((0, max(1, channels)), dtype=np.float32)
+    count = min(max(1, channels), available)
+    result = np.empty((frames, count), dtype=np.float32)
+    for channel in range(count):
+        raw = channel_data[channel].as_buffer(frames * np.dtype(np.float32).itemsize)
+        result[:, channel] = np.frombuffer(raw, dtype=np.float32, count=frames)
+    return result
+
+
+class _MacNativeInputStream:
+    """InputStream-compatible AVAudioEngine wrapper for the current macOS input."""
+
+    def __init__(self, samplerate, channels, callback):
+        from AVFoundation import AVAudioEngine
+
+        self._engine = AVAudioEngine.alloc().init()
+        self._node = self._engine.inputNode()
+        self._callback = callback
+        self._installed = False
+        self._active = False
+        self._tap_error = None
+        audio_format = self._node.outputFormatForBus_(0)
+        self.samplerate = int(audio_format.sampleRate())
+        available_channels = int(audio_format.channelCount())
+        if self.samplerate <= 0 or available_channels <= 0:
+            raise RuntimeError(
+                f"AVAudioEngine 没有可用输入格式: {self.samplerate}Hz/{available_channels}ch")
+        self.channels = min(max(1, int(channels)), available_channels)
+
+        def tap(buffer, _when):
+            try:
+                data = _av_buffer_to_array(buffer, self.channels)
+                if len(data):
+                    self._callback(data, len(data), None, None)
+            except Exception as exc:
+                self._tap_error = exc
+                self._active = False
+
+        self._tap = tap
+
+    @property
+    def active(self):
+        return self._active and self._tap_error is None and bool(self._engine.isRunning())
+
+    def start(self):
+        self._node.installTapOnBus_bufferSize_format_block_(0, 1024, None, self._tap)
+        self._installed = True
+        self._engine.prepare()
+        ok, error = self._engine.startAndReturnError_(None)
+        if not ok:
+            self.close()
+            raise RuntimeError(f"AVAudioEngine 无法启动: {error}")
+        self._active = True
+
+    def stop(self):
+        if self._active or self._engine.isRunning():
+            self._engine.stop()
+        self._active = False
+
+    def close(self):
+        self.stop()
+        if self._installed:
+            self._node.removeTapOnBus_(0)
+            self._installed = False
+
+
 def list_input_devices():
     out = []
     for i, d in enumerate(sd.query_devices()):
@@ -41,9 +113,20 @@ def _api_rank(api: str) -> int:
     return len(_API_RANK)
 
 
+# 虚拟/聚集/回环设备:兜底时跳过它们(会采到静音或回环,不是真麦克风)
+_VIRTUAL_HINTS = ("blackhole", "aggregate", "virtual", "surround", "soundflower",
+                  "loopback", "cable", "vb-audio", "多输出", "聚集设备")
+
+
+def _is_virtual(name: str) -> bool:
+    n = (name or "").lower()
+    return any(h in n for h in _VIRTUAL_HINTS)
+
+
 def pick_devices(name_contains: str):
     """返回按音频接口稳定性排序的候选 [(index, name, api, sr)],供逐个尝试。
-    name_contains 为空则枚举系统默认输入设备的同名各接口实例。"""
+    name_contains 为空=自动:系统默认输入优先,其它真实麦克风兜底(首选开不动时自动降级)。
+    name_contains 指定=严格:只试匹配的设备,开不动就报错(让用户知道该修那只麦)。"""
     devs = list_input_devices()
     if name_contains:
         cands = [d for d in devs if name_contains.lower() in d[1].lower()]
@@ -51,21 +134,34 @@ def pick_devices(name_contains: str):
             raise RuntimeError(
                 f"没有找到名称包含「{name_contains}」的输入设备。"
                 f"请确认耳机已连接,或在设置里重选麦克风。")
-    else:
-        try:
-            default_name = sd.query_devices(kind="input")["name"]
-        except Exception:
-            default_name = ""
-        # 默认设备的核心名(去掉接口后缀噪声),匹配它的所有接口实例
-        key = default_name.split("(")[0].strip()[:12]
-        cands = [d for d in devs if key and key in d[1]] or devs
-    cands = sorted(cands, key=lambda d: (_api_rank(d[2]), d[0]))
-    return cands
+        return sorted(cands, key=lambda d: (_api_rank(d[2]), d[0]))
+    try:
+        default_name = sd.query_devices(kind="input")["name"]
+    except Exception:
+        default_name = ""
+    # 默认设备的核心名(去掉接口后缀噪声),匹配它的所有接口实例——优先
+    key = default_name.split("(")[0].strip()[:12]
+    primary = sorted([d for d in devs if key and key in d[1]],
+                     key=lambda d: (_api_rank(d[2]), d[0]))
+    chosen = {d[0] for d in primary}
+    # 兜底:其它真实麦克风(排除虚拟/聚集设备),默认麦打不开时自动切过去
+    others = sorted([d for d in devs if d[0] not in chosen and not _is_virtual(d[1])],
+                    key=lambda d: (_api_rank(d[2]), d[0]))
+    return (primary + others) or devs
 
 
-def _resolve_samplerate(device, api):
-    """优先让系统直接给 16k(仅 WASAPI 支持 auto_convert),失败则用设备默认采样率。
-    返回 (samplerate, extra_settings)。"""
+def _resolve_samplerate(device, api, channels=1):
+    """macOS 使用设备原生采样率,其他平台优先请求 16k。"""
+    try:
+        info = sd.query_devices(device) if device is not None else sd.query_devices(kind="input")
+        native_rate = int(info["default_samplerate"])
+    except Exception:
+        native_rate = 48000
+    if sys.platform == "darwin":
+        sd.check_input_settings(
+            device=device, samplerate=native_rate, channels=channels, dtype="float32")
+        return native_rate, None
+
     is_wasapi = sys.platform == "win32" and "wasapi" in (api or "").lower()
     if is_wasapi:
         try:
@@ -82,10 +178,31 @@ def _resolve_samplerate(device, api):
     except Exception:
         pass
     try:
-        info = sd.query_devices(device) if device is not None else sd.query_devices(kind="input")
-        return int(info["default_samplerate"]), None
+        return native_rate, None
     except Exception:
         return 48000, None
+
+
+def _capture_channels(device):
+    """DJI 接收器在 macOS 下是双声道;同时采集可兼容 TX1/TX2 路由。"""
+    if sys.platform != "darwin":
+        return 1
+    try:
+        info = sd.query_devices(device) if device is not None else sd.query_devices(kind="input")
+        return max(1, min(2, int(info["max_input_channels"])))
+    except Exception:
+        return 1
+
+
+def _mix_to_mono(indata):
+    """等功率合并输入声道,单个发射器不会因双声道采集衰减 6dB。"""
+    if indata.ndim == 1:
+        return indata.astype(np.float32, copy=True)
+    channels = indata.shape[1]
+    if channels <= 1:
+        return indata[:, 0].astype(np.float32, copy=True)
+    mixed = np.sum(indata, axis=1, dtype=np.float32) / np.sqrt(float(channels))
+    return np.clip(mixed, -1.0, 1.0).astype(np.float32, copy=False)
 
 
 class Recorder:
@@ -94,6 +211,7 @@ class Recorder:
         self.max_seconds = float(max_seconds)
         self.persistent = persistent
         self.sample_rate = 16000
+        self.capture_channels = 1
         self.truncated = False
         self._lock = threading.Lock()
         self._stream = None
@@ -117,7 +235,9 @@ class Recorder:
         for idx, (device, name, api, _sr) in enumerate(cands):
             try:
                 self._open_on(device, api)
-                print(f"[recorder] 使用设备 #{device} {name} ({api}) @ {self.sample_rate}Hz")
+                print(
+                    f"[recorder] 使用设备 #{device} {name} ({api}) "
+                    f"@ {self.sample_rate}Hz/{self.capture_channels}ch")
                 return
             except Exception as e:
                 last_err = e
@@ -126,15 +246,14 @@ class Recorder:
         raise RuntimeError(f"所有音频接口都打不开麦克风。最后错误: {last_err}")
 
     def _open_on(self, device, api):
-        self.sample_rate, extra = _resolve_samplerate(device, api)
-        self._max_frames = int(self.max_seconds * self.sample_rate)
-        self._preroll_target = int(0.3 * self.sample_rate)
+        self.capture_channels = _capture_channels(device)
+        self.sample_rate, extra = _resolve_samplerate(device, api, self.capture_channels)
 
         def cb(indata, frames, time_info, status):
             with self._lock:
                 if status:
                     self._stream_error = True  # 只置标志,绝不在回调里 print
-                mono = indata[:, 0].copy()
+                mono = _mix_to_mono(indata)
                 self.level = float((mono * mono).mean()) ** 0.5
                 self._preroll.append(mono)
                 self._preroll_len += len(mono)
@@ -156,11 +275,25 @@ class Recorder:
                         except Exception:
                             pass  # 队列满就丢草稿块,不能阻塞音频回调
 
-        kwargs = dict(device=device, channels=1, samplerate=self.sample_rate,
-                      dtype="float32", callback=cb)
-        if extra is not None:
-            kwargs["extra_settings"] = extra
-        self._stream = sd.InputStream(**kwargs)
+        if sys.platform == "darwin":
+            default_device = sd.default.device[0]
+            if int(default_device) != int(device):
+                raise RuntimeError("macOS 原生录音要求所选麦克风同时是系统默认输入设备")
+            self._stream = _MacNativeInputStream(
+                samplerate=self.sample_rate,
+                channels=self.capture_channels,
+                callback=cb,
+            )
+            self.sample_rate = self._stream.samplerate
+            self.capture_channels = self._stream.channels
+        else:
+            kwargs = dict(device=device, channels=self.capture_channels, samplerate=self.sample_rate,
+                          dtype="float32", callback=cb)
+            if extra is not None:
+                kwargs["extra_settings"] = extra
+            self._stream = sd.InputStream(**kwargs)
+        self._max_frames = int(self.max_seconds * self.sample_rate)
+        self._preroll_target = int(0.3 * self.sample_rate)
         self._stream.start()
         self._stream_error = False
 

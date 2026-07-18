@@ -214,7 +214,7 @@ from sounds import play  # noqa: E402  柔和提示音(带蜂鸣兜底)
 # 界面层(悬浮条/设置窗口/动画控件/历史)在 ui.py
 from ui import Overlay, SettingsDialog, HistoryDialog  # noqa: E402
 
-VERSION = "3.7.0"
+VERSION = "3.7.1"
 
 
 def brand_pixmap(size):
@@ -849,6 +849,17 @@ class VoiceInputApp:
                     self.cfg.setdefault("ui", {}),
                     get_level=lambda: getattr(getattr(self, "recorder", None), "level", 0.0))
                 self.pet.clicked.connect(self._on_pet_click)
+                # 新版桌宠的交互都回接主程序，确保配置真正保存、菜单状态同步。
+                if hasattr(self.pet, "double_clicked"):
+                    self.pet.double_clicked.connect(self._open_memory_bank)
+                if hasattr(self.pet, "hide_requested"):
+                    self.pet.hide_requested.connect(self._hide_pet_from_context)
+                if hasattr(self.pet, "settings_requested"):
+                    self.pet.settings_requested.connect(self._open_settings)
+                if hasattr(self.pet, "skin_changed"):
+                    self.pet.skin_changed.connect(self._set_pet_skin)
+                if hasattr(self.pet, "reset_requested"):
+                    self.pet.reset_requested.connect(self._reset_pet_pos)
                 self._seed_pet_memory()
                 self.pet.show()
             except Exception:
@@ -866,6 +877,12 @@ class VoiceInputApp:
         self.cfg.setdefault("ui", {})["pet_enabled"] = bool(checked)
         self._save_config()
         self._ensure_pet()
+
+    def _hide_pet_from_context(self):
+        """桌宠右键隐藏：同步托盘勾选状态与持久化配置。"""
+        if hasattr(self, "_act_pet_on"):
+            self._act_pet_on.setChecked(False)
+        self._toggle_pet(False)
 
     def _set_pet_skin(self, skin):
         self.cfg.setdefault("ui", {})["pet_skin"] = skin

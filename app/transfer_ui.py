@@ -6,9 +6,9 @@ import sys
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QDragEnterEvent, QDropEvent
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QMessageBox,
-    QPlainTextEdit, QProgressBar, QPushButton, QScrollArea, QTabWidget,
-    QVBoxLayout, QWidget,
+    QApplication, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel,
+    QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea,
+    QTabWidget, QVBoxLayout, QWidget,
 )
 
 from ui import QSS, ui_font
@@ -73,7 +73,7 @@ class DropZone(QLabel):
     dropped = Signal(list)
 
     def __init__(self):
-        super().__init__("把文件拖到这里(可一次拖多个)")
+        super().__init__("把文件拖到这里(可一次拖多个)\n拖不动就点下面「选择文件」")
         self.setObjectName("dropzone")
         self.setAlignment(Qt.AlignCenter)
         self.setMinimumHeight(96)
@@ -187,6 +187,11 @@ class QuickTransferDialog(QDialog):
         drop.dropped.connect(self._add_files)
         v.addWidget(drop)
 
+        # 选择文件按钮:Windows 拖拽常因权限/环境失效,点这个一定能选
+        pick = QPushButton("＋ 选择文件…")
+        pick.clicked.connect(self._pick_files)
+        v.addWidget(pick)
+
         # 暂存卡片区(可滚动)
         self.stage = QVBoxLayout()
         self.stage.setSpacing(6)
@@ -223,6 +228,13 @@ class QuickTransferDialog(QDialog):
                 d = self.peer_box.itemData(i)
                 if d and d.get("id") == cur.get("id"):
                     self.peer_box.setCurrentIndex(i); break
+
+    def _pick_files(self):
+        paths, _ = QFileDialog.getOpenFileNames(self, "选择要发送的文件",
+                                                os.path.expanduser("~"))
+        files = [p for p in paths if p and os.path.isfile(p)]
+        if files:
+            self._add_files(files)
 
     def _add_files(self, paths):
         for p in paths:
